@@ -1,0 +1,9 @@
+redis==5.0.1
+requests==2.31.0
+openai==1.7.2
+markdownify==0.12.1
+pdfplumber==0.10.3
+PyPDF2==3.0.1
+pymupdf==1.23.8
+python-dotenv==1.0.0
+openpyxl==3.1.2

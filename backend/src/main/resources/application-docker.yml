@@ -1,0 +1,21 @@
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+
+  redis:
+    host: ${SPRING_REDIS_HOST}
+    port: ${SPRING_REDIS_PORT}
+    password: ${SPRING_REDIS_PASSWORD}
+
+app:
+  storage:
+    upload-path: ${UPLOAD_PATH}
+    processed-path: ${PROCESSED_PATH}
+    excel-path: ${EXCEL_PATH}
+
+logging:
+  level:
+    root: INFO
+    com.docextract: INFO
