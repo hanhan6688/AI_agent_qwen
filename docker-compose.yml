@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: docextract-postgres
+    environment:
+      POSTGRES_DB: docextract
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d docextract"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - docextract-network
+    restart: unless-stopped
+
+  # Redis 缓存和队列
+  redis:
+    image: redis:7-alpine
+    container_name: docextract-redis
+    command: redis-server --port 6380 --appendonly yes --requirepass docextract123
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6380:6380"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6380", "-a", "docextract123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - docextract-network
+
+
+networks:
+  docextract-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:

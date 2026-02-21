@@ -1,0 +1,23 @@
+# Python Worker 依赖包
+
+# HTTP请求库
+requests>=2.31.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# 阿里云服务SDK（Qwen3-VL）
+dashscope>=1.14.0
+
+# 类型提示
+typing-extensions>=4.8.0
+
+# 数据处理和Excel生成
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# 日志增强（可选）
+# coloredlogs>=15.0
+
+# 性能监控（可选）
+# psutil>=5.9.0

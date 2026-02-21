@@ -1,0 +1,88 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: docextract-backend
+
+  # 数据库配置
+  datasource:
+    url: jdbc:postgresql://localhost:5433/docextract
+    username: admin
+    password: password123
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  # JPA配置
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        use_sql_comments: true
+        jdbc:
+          time_zone: GMT+8
+
+  # Redis配置
+  data:
+    redis:
+      host: localhost
+      port: 6380
+      password: docextract123
+      timeout: 6000ms
+      lettuce:
+        pool:
+          max-active: 8
+          max-wait: -1ms
+          max-idle: 8
+          min-idle: 0
+
+  # 文件上传配置
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 100MB
+      max-request-size: 1000MB
+
+# 文件存储配置
+file:
+  upload-dir: C:/Users/1/Desktop/AI_agent_qwen-main/data/uploads
+  output-dir: C:/Users/1/Desktop/AI_agent_qwen-main/data/outputs
+  data-dir: C:/Users/1/Desktop/AI_agent_qwen-main/data
+
+# Python工作脚本路径
+python:
+  worker-dir: C:/Users/1/Desktop/AI_agent_qwen-main/python-worker
+  script-path: integrated_processor.py
+  python-path: C:/Users/1/anaconda3/envs/fastApi/python.exe
+  mineru-timeout: 3600  # MinerU处理超时时间（秒），默认1小时
+
+# Qwen智能提取配置
+qwen:
+  api-key: ${DASHSCOPE_API_KEY:}
+  model: qwen-vl-max-latest
+  max-concurrent: 3       # 最大并发处理数
+  task-timeout: 600       # 单任务超时（秒）
+  max-retries: 3          # 最大重试次数
+  retry-interval: 5       # 重试间隔（秒）
+  max-tpm: 1000000        # TPM限制
+  max-images: 15          # 单次最大图片数
+  max-context-length: 150000  # 最大上下文长度
+
+# 日志配置
+logging:
+  level:
+    com.docextract: DEBUG
+    org.springframework.web: INFO
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
