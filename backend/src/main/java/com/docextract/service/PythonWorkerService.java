@@ -39,10 +39,10 @@ public class PythonWorkerService {
     private final RedisTemplate<String, Object> redisTemplate;
     private final ObjectMapper objectMapper;
 
-    public Map<String, Object> processTask(Task task, String extractFieldsJson) {
+    public Map<String, Object> processTask(Task task, String extractFieldsJson, String modelMode) {
         try {
             // 1. 准备输入数据
-            Map<String, Object> inputData = prepareInputData(task);
+            Map<String, Object> inputData = prepareInputData(task, modelMode);
 
             // 2. 将输入数据写入临时文件
             String inputFileName = "input_" + task.getTaskId() + ".json";
@@ -65,11 +65,12 @@ public class PythonWorkerService {
         }
     }
 
-    private Map<String, Object> prepareInputData(Task task) throws IOException {
+    private Map<String, Object> prepareInputData(Task task, String modelMode) throws IOException {
         Map<String, Object> inputData = new HashMap<>();
         inputData.put("taskId", task.getTaskId());
         inputData.put("taskName", task.getTaskName());
         inputData.put("userId", task.getUser().getUserId());
+        inputData.put("modelMode", modelMode);  // 添加模型模式
 
         // 获取文件路径
         if (task.getFilePath() != null) {

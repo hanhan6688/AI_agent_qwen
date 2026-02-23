@@ -38,9 +38,10 @@ public class TaskController {
             @RequestParam String taskName,
             @RequestParam String extractFields,
             @RequestParam Long userId,
+            @RequestParam(value = "modelMode", defaultValue = "normal") String modelMode,
             @RequestParam("files") MultipartFile[] files) {
 
-        log.info("创建任务: taskName={}, userId={}, 文件数量={}", taskName, userId, files.length);
+        log.info("创建任务: taskName={}, userId={}, modelMode={}, 文件数量={}", taskName, userId, modelMode, files.length);
 
         // 检查活跃任务数
         long activeCount = taskService.getActiveTaskCount(userId);
@@ -48,7 +49,7 @@ public class TaskController {
             return Response.error("您有太多正在处理的任务，请稍后再试");
         }
 
-        List<TaskDTO> tasks = taskService.createTasks(userId, taskName, extractFields, files);
+        List<TaskDTO> tasks = taskService.createTasks(userId, taskName, extractFields, modelMode, files);
         return Response.success("任务创建成功，正在后台处理", tasks);
     }
 

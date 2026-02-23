@@ -24,7 +24,7 @@ logger = logging.getLogger('IntegratedProcessor')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_process import upload_batch, wait_until_done, fetch_and_download, BATCH_SIZE
-from qwen_process_url_new import extract_once, preprocess_context
+from qwen_process_url_new import extract_once, preprocess_context, MODEL_PRO
 
 def load_config():
     """加载环境变量"""
@@ -85,7 +85,8 @@ def build_prompt_from_fields(extract_fields) -> str:
 def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path, 
                         task_data_dir: Optional[Path] = None, 
                         original_filename: Optional[str] = None,
-                        extract_fields: Optional[Dict] = None) -> Tuple[str, Dict]:
+                        extract_fields: Optional[Dict] = None,
+                        model_mode: str = "normal") -> Tuple[str, Dict]:
     """
     处理单个PDF文件的完整流程
     
@@ -96,6 +97,9 @@ def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path,
         task_data_dir: 任务数据目录（用于保存JSON结果）
         original_filename: 原始文件名（用于命名JSON）
         extract_fields: 前端传入的提取字段配置
+        model_mode: 模型模式
+            - "normal": 普通版 - 智能路由（qwen3-vl-plus / qwen-long）
+            - "pro": 专业版 - 统一使用 qwen3.5-plus
     
     Returns:
         (status, result) 元组
@@ -169,7 +173,7 @@ def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path,
             logger.info(f"找到Markdown文件: {md_file}")
         
         # 步骤4: 使用Qwen3-VL提取信息
-        logger.info("=== 步骤4: 使用Qwen3-VL提取信息 ===")
+        logger.info("=== 步骤4: 使用Qwen提取信息 ===")
         # 构建动态提示词
         prompt = build_prompt_from_fields(extract_fields)
         # 安全地记录提取字段信息
@@ -183,7 +187,12 @@ def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path,
                 logger.info(f"提取字段: {extract_fields}")
         else:
             logger.info("提取字段: 默认")
-        status, result = extract_once(str(md_file), prompt=prompt)
+        
+        # 记录模型模式
+        mode_text = "专业版 (qwen3.5-plus)" if model_mode == "pro" else "普通版 (智能路由)"
+        logger.info(f"模型模式: {mode_text}")
+        
+        status, result = extract_once(str(md_file), prompt=prompt, model_mode=model_mode)
         
         if status == "success":
             # 保存JSON到任务目录
@@ -246,6 +255,7 @@ def main():
         pdf_path = file_info.get('filePath')
         original_filename = file_info.get('fileName')
         task_data_dir_str = file_info.get('taskDataDir')
+        model_mode = input_data.get('modelMode', 'normal')  # 获取模型模式，默认普通版
         
         if not pdf_path:
             raise ValueError("filePath不能为空")
@@ -259,7 +269,8 @@ def main():
             except json.JSONDecodeError as e:
                 logger.warning(f"解析提取字段JSON失败: {e}")
         
-        logger.info(f"开始处理任务: taskId={task_id}, taskName={task_name}, file={pdf_path}")
+        mode_text = "专业版" if model_mode == "pro" else "普通版"
+        logger.info(f"开始处理任务: taskId={task_id}, taskName={task_name}, file={pdf_path}, 模式={mode_text}")
         
         # 加载配置
         config = load_config()
@@ -277,8 +288,12 @@ def main():
                 pdf_path, config, temp_work_dir, 
                 task_data_dir=task_data_dir,
                 original_filename=original_filename,
-                extract_fields=extract_fields
+                extract_fields=extract_fields,
+                model_mode=model_mode
             )
+            
+            # 从结果中获取实际使用的模型
+            actual_model = result.get("_model_route", {}).get("model", "unknown") if isinstance(result, dict) else "unknown"
             
             # 构建输出
             if status == "success":
@@ -287,7 +302,8 @@ def main():
                     "message": "处理完成",
                     "data": result,
                     "confidence": 0.95,
-                    "model": "qwen-vl-max-latest",
+                    "model": actual_model,
+                    "model_mode": model_mode,
                     "mineru_processed": True,
                     "task_data_dir": str(task_data_dir) if task_data_dir else None
                 }
@@ -297,7 +313,8 @@ def main():
                     "message": "部分数据提取成功",
                     "data": result,
                     "confidence": 0.7,
-                    "model": "qwen-vl-max-latest",
+                    "model": actual_model,
+                    "model_mode": model_mode,
                     "task_data_dir": str(task_data_dir) if task_data_dir else None
                 }
             else:

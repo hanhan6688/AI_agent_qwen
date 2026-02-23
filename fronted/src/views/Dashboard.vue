@@ -63,6 +63,35 @@
           />
         </div>
 
+        <!-- 模型模式选择 -->
+        <div class="form-group">
+          <label>模型模式</label>
+          <div class="model-mode-selector">
+            <button 
+              class="mode-btn" 
+              :class="{ active: modelMode === 'normal' }"
+              @click="modelMode = 'normal'"
+            >
+              <span class="mode-icon">⚡</span>
+              <span class="mode-text">
+                <span class="mode-title">普通版</span>
+                <span class="mode-desc">智能路由 (qwen3-vl-plus / qwen-long)</span>
+              </span>
+            </button>
+            <button 
+              class="mode-btn pro" 
+              :class="{ active: modelMode === 'pro' }"
+              @click="modelMode = 'pro'"
+            >
+              <span class="mode-icon">🚀</span>
+              <span class="mode-text">
+                <span class="mode-title">专业版</span>
+                <span class="mode-desc">更强推理 (qwen3.5-plus, 991K上下文)</span>
+              </span>
+            </button>
+          </div>
+        </div>
+
         <div class="form-group">
           <label>提取字段配置</label>
           <div class="extract-fields">
@@ -122,6 +151,7 @@ const dragover = ref(false)
 const selectedFiles = ref([])
 const fileInput = ref(null)
 const taskName = ref('')
+const modelMode = ref('normal')  // 默认普通版
 const uploading = ref(false)
 const message = ref('')
 const messageType = ref('')
@@ -245,6 +275,9 @@ const submitTask = async () => {
       description: f.description.trim()
     }))
     formData.append('extractFields', JSON.stringify(fieldsJson))
+    
+    // 添加模型模式
+    formData.append('modelMode', modelMode.value)
 
     // 添加所有文件
     selectedFiles.value.forEach((file, index) => {
@@ -490,6 +523,65 @@ const showMessage = (text, type = 'success') => {
   flex-direction: column;
   gap: 0.8rem;
   margin-bottom: 1.5rem;
+}
+
+/* 模型模式选择器 */
+.model-mode-selector {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.mode-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 2px solid #e2e8f0;
+  border-radius: 8px;
+  background: white;
+  cursor: pointer;
+  transition: all 0.3s;
+  text-align: left;
+
+  &:hover {
+    border-color: #cbd5e0;
+    background: #f7fafc;
+  }
+
+  &.active {
+    border-color: #4299e1;
+    background: #ebf8ff;
+    box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.2);
+  }
+
+  &.pro.active {
+    border-color: #9f7aea;
+    background: #faf5ff;
+    box-shadow: 0 0 0 3px rgba(159, 122, 234, 0.2);
+  }
+}
+
+.mode-icon {
+  font-size: 1.5rem;
+}
+
+.mode-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.mode-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #2d3748;
+}
+
+.mode-desc {
+  font-size: 0.8rem;
+  color: #718096;
 }
 
 .field-row {

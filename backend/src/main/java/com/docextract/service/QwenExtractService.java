@@ -58,7 +58,7 @@ public class QwenExtractService {
     /**
      * 处理提取任务
      */
-    public Map<String, Object> processTask(Task task, String extractFieldsJson) {
+    public Map<String, Object> processTask(Task task, String extractFieldsJson, String modelMode) {
         String progressKey = PROGRESS_KEY_PREFIX + task.getTaskId();
 
         try {
@@ -68,13 +68,13 @@ public class QwenExtractService {
             }
 
             activeProcesses.incrementAndGet();
-            log.info("开始处理任务: taskId={}, 活跃进程数={}", task.getTaskId(), activeProcesses.get());
+            log.info("开始处理任务: taskId={}, modelMode={}, 活跃进程数={}", task.getTaskId(), modelMode, activeProcesses.get());
 
             // 更新进度：准备阶段
             updateProgress(progressKey, TaskProgressDTO.of(task.getTaskId(), "UPLOADING", 10));
 
-            // 准备输入数据
-            Map<String, Object> inputData = prepareInputData(task);
+            // 准备输入数据（包含 modelMode）
+            Map<String, Object> inputData = prepareInputData(task, modelMode);
             Path inputFilePath = writeInputFile(task, inputData);
 
             // 更新进度：OCR阶段
@@ -307,11 +307,12 @@ public class QwenExtractService {
     /**
      * 准备输入数据
      */
-    private Map<String, Object> prepareInputData(Task task) {
+    private Map<String, Object> prepareInputData(Task task, String modelMode) {
         Map<String, Object> inputData = new HashMap<>();
         inputData.put("taskId", task.getTaskId());
         inputData.put("taskName", task.getTaskName());
         inputData.put("userId", task.getUser().getUserId());
+        inputData.put("modelMode", modelMode);  // 添加模型模式
 
         if (task.getFilePath() != null) {
             String fileName = (String) task.getFilePath().get("fileName");

@@ -57,7 +57,7 @@ public class TaskService {
      * 创建批量提取任务
      */
     @Transactional
-    public List<TaskDTO> createTasks(Long userId, String taskName, String extractFieldsJson, MultipartFile[] files) {
+    public List<TaskDTO> createTasks(Long userId, String taskName, String extractFieldsJson, String modelMode, MultipartFile[] files) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("用户不存在"));
 
@@ -126,11 +126,12 @@ public class TaskService {
                 .collect(Collectors.toList());
 
         // 在事务提交后再启动异步处理
+        String finalModelMode = modelMode;
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                log.info("事务已提交，开始异步处理任务: {}", taskIds);
-                processTasksBatchAsync(taskIds, extractFieldsJson);
+                log.info("事务已提交，开始异步处理任务: {}, modelMode={}", taskIds, finalModelMode);
+                processTasksBatchAsync(taskIds, extractFieldsJson, finalModelMode);
             }
         });
 
@@ -143,12 +144,12 @@ public class TaskService {
      * 异步批量处理任务
      */
     @Async("taskExecutor")
-    public void processTasksBatchAsync(List<Long> taskIds, String extractFieldsJson) {
-        log.info("开始批量处理任务: {} 个", taskIds.size());
+    public void processTasksBatchAsync(List<Long> taskIds, String extractFieldsJson, String modelMode) {
+        log.info("开始批量处理任务: {} 个, modelMode={}", taskIds.size(), modelMode);
 
         // 使用CompletableFuture进行并行处理
         List<CompletableFuture<Void>> futures = taskIds.stream()
-                .map(taskId -> CompletableFuture.runAsync(() -> processSingleTask(taskId, extractFieldsJson)))
+                .map(taskId -> CompletableFuture.runAsync(() -> processSingleTask(taskId, extractFieldsJson, modelMode)))
                 .toList();
 
         // 等待所有任务完成
@@ -161,7 +162,7 @@ public class TaskService {
      * 处理单个任务
      */
     @Transactional
-    public void processSingleTask(Long taskId, String extractFieldsJson) {
+    public void processSingleTask(Long taskId, String extractFieldsJson, String modelMode) {
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> new RuntimeException("任务不存在: " + taskId));
 
@@ -171,8 +172,8 @@ public class TaskService {
             task.setProgress(5);
             taskRepository.save(task);
 
-            // 调用Qwen提取服务
-            Map<String, Object> result = qwenExtractService.processTask(task, extractFieldsJson);
+            // 调用Qwen提取服务，传递 modelMode
+            Map<String, Object> result = qwenExtractService.processTask(task, extractFieldsJson, modelMode);
 
             // 保存结果
             task.setResult(result);
@@ -183,14 +184,15 @@ public class TaskService {
 
             // 添加处理详情
             Map<String, Object> details = new HashMap<>();
-            details.put("model", result.getOrDefault("model", "qwen-vl-max-latest"));
+            details.put("model", result.getOrDefault("model", "unknown"));
+            details.put("modelMode", modelMode);
             details.put("confidence", result.getOrDefault("confidence", 0.0));
             details.put("processedAt", LocalDateTime.now().toString());
             task.setProcessingDetails(details);
 
             taskRepository.save(task);
 
-            log.info("任务处理完成: taskId={}", task.getTaskId());
+            log.info("任务处理完成: taskId={}, model={}", task.getTaskId(), details.get("model"));
 
         } catch (Exception e) {
             log.error("任务处理失败: taskId={}", task.getTaskId(), e);
@@ -228,8 +230,8 @@ public class TaskService {
         task.setStartTime(LocalDateTime.now());
         taskRepository.save(task);
 
-        // 异步处理
-        processSingleTask(taskId, extractFieldsJson);
+        // 异步处理 - 重试时使用普通版模式
+        processSingleTask(taskId, extractFieldsJson, "normal");
 
         return convertToDTO(task);
     }
