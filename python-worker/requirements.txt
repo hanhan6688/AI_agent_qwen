@@ -9,6 +9,9 @@ python-dotenv>=1.0.0
 # 阿里云服务SDK（Qwen3-VL）
 dashscope>=1.14.0
 
+# OpenAI SDK（用于本地模型调用）
+openai>=1.0.0
+
 # 类型提示
 typing-extensions>=4.8.0
 

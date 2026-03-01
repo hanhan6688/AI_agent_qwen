@@ -13,6 +13,13 @@ import dashscope
 from dotenv import load_dotenv
 from typing import Tuple, Optional, Dict, Any
 
+# 导入本地模型客户端
+try:
+    from local_model_client import LocalModelClient, LocalModelConfig, create_client
+    LOCAL_MODEL_AVAILABLE = True
+except ImportError:
+    LOCAL_MODEL_AVAILABLE = False
+
 load_dotenv()
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
@@ -400,6 +407,7 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal") -
         model_mode: 模型模式
             - "normal": 普通版 - 智能路由（qwen3-vl-plus / qwen-long）
             - "pro": 专业版 - 统一使用 qwen3.5-plus（更强大，991K上下文）
+            - "local": 本地模型 - 使用本地部署的模型（OpenAI 兼容 API）
     
     Returns:
         (status, result) 元组
@@ -442,7 +450,25 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal") -
         logger.info(f"🖼️ 共找到 {len(abs_imgs)} 张图片")
 
         # 3. 🚀 模型选择逻辑
-        if model_mode == "pro":
+        if model_mode == "local":
+            # 本地模型模式
+            if not LOCAL_MODEL_AVAILABLE:
+                raise RuntimeError("本地模型功能不可用，请确保 openai 库已安装: pip install openai")
+            
+            local_config = LocalModelConfig.load_from_env()
+            if not local_config.get("enabled"):
+                logger.warning("本地模型未启用，将尝试加载配置...")
+            
+            selected_model = local_config.get("model", "local-model")
+            route_info = {
+                "model": selected_model,
+                "has_figures": len(abs_imgs) > 0,
+                "reason": f"本地模型模式 → 使用 {selected_model}（OpenAI 兼容 API）",
+                "base_url": local_config.get("base_url"),
+                "preset": local_config.get("preset")
+            }
+            logger.info(f"🖥️ 本地模型模式: {selected_model} @ {local_config.get('base_url')}")
+        elif model_mode == "pro":
             # 专业版：统一使用 qwen3.5-plus
             selected_model = MODEL_PRO
             route_info = {
@@ -457,97 +483,172 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal") -
             logger.info(f"📊 智能路由决策: 模型={selected_model}, 原因={route_info.get('reason', 'N/A')}")
         
         # 4. 根据模型类型进行文本预处理（不同模型有不同的上下文限制）
-        text = preprocess_context(raw_text, model=selected_model)
-        logger.info(f"📄 文本长度: {len(text)} 字符 (模型: {selected_model})")
+        # 本地模型不做预处理截断，由模型自己处理
+        if model_mode == "local":
+            text = raw_text  # 本地模型不截断
+            estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
+            logger.info(f"📄 本地模型文本长度: {len(text)} 字符")
+            logger.info(f"💰 本地模型估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
+        else:
+            text = preprocess_context(raw_text, model=selected_model)
+            logger.info(f"📄 文本长度: {len(text)} 字符 (模型: {selected_model})")
         
         # 5. 估算token
-        if selected_model == MODEL_LONG:
-            # qwen-long 是纯文本模型，不计入图片token
-            estimated_tokens = len(text) // 3.5
-            logger.info(f"💰 qwen-long 纯文本估算: {estimated_tokens} tokens")
-        elif selected_model == MODEL_PRO:
-            # qwen3.5-plus 专业版
-            estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
-            logger.info(f"💰 qwen3.5-plus 估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
+        if model_mode != "local":
+            if selected_model == MODEL_LONG:
+                # qwen-long 是纯文本模型，不计入图片token
+                estimated_tokens = len(text) // 3.5
+                logger.info(f"💰 qwen-long 纯文本估算: {estimated_tokens} tokens")
+            elif selected_model == MODEL_PRO:
+                # qwen3.5-plus 专业版
+                estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
+                logger.info(f"💰 qwen3.5-plus 估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
+            else:
+                # qwen3-vl-plus
+                estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
+                logger.info(f"💰 qwen3-vl-plus 估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
+        
+        # 6. 调用模型 API
+        if model_mode == "local":
+            # 本地模型调用
+            return _call_local_model(text, abs_imgs, prompt, route_info)
         else:
-            # qwen3-vl-plus
-            estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
-            logger.info(f"💰 qwen3-vl-plus 估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
-        
-        # 6. 添加重试机制
-        max_retries = 3
-        rsp = None
-        for attempt in range(max_retries):
-            try:
-                wait_for_tokens(estimated_tokens)
-                
-                # 根据模型类型构建不同的消息格式
-                if selected_model == MODEL_LONG:
-                    # qwen-long 使用简单文本格式
-                    messages = build_messages_for_long(text, prompt=prompt)
-                else:
-                    # qwen-vl 使用多模态格式
-                    messages = build_messages(text, abs_imgs, prompt=prompt)
-                
-                rsp = MultiModalConversation.call(
-                    model=selected_model,
-                    messages=messages,
-                    temperature=0,
-                    response_format={"type": "json_object"}
-                )
-                if rsp.status_code == 200:
-                    break  # 成功则退出重试循环
-                else:
-                    logger.warning(f"API返回状态码异常: {rsp.status_code} (尝试 {attempt+1}/{max_retries})")
-            except Exception as e:
-                logger.warning(f"API调用失败 (尝试 {attempt+1}/{max_retries}): {str(e)}")
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # 指数退避
-                    logger.info(f"等待 {wait_time} 秒后重试...")
-                    time.sleep(wait_time)
-        
-        if not rsp or rsp.status_code != 200:
-            error_msg = f"API错误: {getattr(rsp, 'message', 'Unknown error')}" if rsp else "API调用失败"
-            raise RuntimeError(error_msg)
-        
-        # 7. 解析返回
-        content = rsp.output.choices[0].message.content
-        if isinstance(content, list) and content and "text" in content[0]:
-            json_str = content[0]["text"]
-            
-            # 先尝试直接解析
-            try:
-                result = json.loads(json_str)
-                # 添加模型路由信息到结果
-                result["_model_route"] = {
-                    "model": selected_model,
-                    "has_figures": route_info.get("has_figures"),
-                    "reason": route_info.get("reason"),
-                    "text_length": len(text)
-                }
-                return ("success", result)
-            except json.JSONDecodeError:
-                pass
-            
-            # 尝试修复
-            repaired_obj = try_repair_json(json_str)
-            if repaired_obj is not None:
-                repaired_obj["_model_route"] = {
-                    "model": selected_model,
-                    "has_figures": route_info.get("has_figures"),
-                    "reason": route_info.get("reason"),
-                    "text_length": len(text)
-                }
-                return ("success", repaired_obj)
-            
-            # 修复失败，返回原始响应
-            return ("partial_data", json_str)
-        else:
-            return ("error", "API返回格式错误")
+            # 云端模型调用
+            return _call_cloud_model(text, abs_imgs, prompt, selected_model, route_info, estimated_tokens)
             
     except Exception as e:
         logger.error(f"处理失败: {e}")
         return ("error", str(e))
+
+
+def _call_local_model(text: str, abs_imgs: list, prompt: str, route_info: dict) -> tuple:
+    """调用本地模型"""
+    try:
+        local_config = LocalModelConfig.load_from_env()
+        client = LocalModelClient(local_config)
+        
+        logger.info(f"🚀 调用本地模型: {local_config.get('model')}")
+        
+        # 调用本地模型
+        status, result = client.extract_json(
+            text=text,
+            image_paths=abs_imgs,
+            prompt=prompt
+        )
+        
+        if status == "success":
+            # 添加模型路由信息
+            result["_model_route"] = {
+                "model": route_info.get("model"),
+                "has_figures": route_info.get("has_figures"),
+                "reason": route_info.get("reason"),
+                "base_url": route_info.get("base_url"),
+                "text_length": len(text)
+            }
+            # 如果有思考内容，记录到日志
+            if result.get("_local_model", {}).get("reasoning"):
+                logger.info(f"💭 模型思考内容已记录")
+            return ("success", result)
+        elif status == "partial_data":
+            # 尝试修复 JSON
+            raw_content = result.get("raw_content", "")
+            repaired_obj = try_repair_json(raw_content)
+            if repaired_obj is not None:
+                repaired_obj["_model_route"] = {
+                    "model": route_info.get("model"),
+                    "has_figures": route_info.get("has_figures"),
+                    "reason": route_info.get("reason"),
+                    "base_url": route_info.get("base_url"),
+                    "text_length": len(text)
+                }
+                repaired_obj["_local_model"] = {
+                    "model": route_info.get("model"),
+                    "base_url": route_info.get("base_url"),
+                    "reasoning": result.get("reasoning")
+                }
+                return ("success", repaired_obj)
+            return ("partial_data", result)
+        else:
+            return status, result
+            
+    except Exception as e:
+        logger.error(f"本地模型调用失败: {e}")
+        return ("error", str(e))
+
+
+def _call_cloud_model(text: str, abs_imgs: list, prompt: str, selected_model: str, 
+                       route_info: dict, estimated_tokens: int) -> tuple:
+    """调用云端模型（DashScope API）"""
+    # 添加重试机制
+    max_retries = 3
+    rsp = None
+    for attempt in range(max_retries):
+        try:
+            wait_for_tokens(estimated_tokens)
+            
+            # 根据模型类型构建不同的消息格式
+            if selected_model == MODEL_LONG:
+                # qwen-long 使用简单文本格式
+                messages = build_messages_for_long(text, prompt=prompt)
+            else:
+                # qwen-vl 使用多模态格式
+                messages = build_messages(text, abs_imgs, prompt=prompt)
+            
+            rsp = MultiModalConversation.call(
+                model=selected_model,
+                messages=messages,
+                temperature=0,
+                response_format={"type": "json_object"}
+            )
+            if rsp.status_code == 200:
+                break  # 成功则退出重试循环
+            else:
+                logger.warning(f"API返回状态码异常: {rsp.status_code} (尝试 {attempt+1}/{max_retries})")
+        except Exception as e:
+            logger.warning(f"API调用失败 (尝试 {attempt+1}/{max_retries}): {str(e)}")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # 指数退避
+                logger.info(f"等待 {wait_time} 秒后重试...")
+                time.sleep(wait_time)
+    
+    if not rsp or rsp.status_code != 200:
+        error_msg = f"API错误: {getattr(rsp, 'message', 'Unknown error')}" if rsp else "API调用失败"
+        raise RuntimeError(error_msg)
+    
+    # 解析返回
+    content = rsp.output.choices[0].message.content
+    if isinstance(content, list) and content and "text" in content[0]:
+        json_str = content[0]["text"]
+        
+        # 先尝试直接解析
+        try:
+            result = json.loads(json_str)
+            # 添加模型路由信息到结果
+            result["_model_route"] = {
+                "model": selected_model,
+                "has_figures": route_info.get("has_figures"),
+                "reason": route_info.get("reason"),
+                "text_length": len(text)
+            }
+            return ("success", result)
+        except json.JSONDecodeError:
+            pass
+        
+        # 尝试修复
+        repaired_obj = try_repair_json(json_str)
+        if repaired_obj is not None:
+            repaired_obj["_model_route"] = {
+                "model": selected_model,
+                "has_figures": route_info.get("has_figures"),
+                "reason": route_info.get("reason"),
+                "text_length": len(text)
+            }
+            return ("success", repaired_obj)
+        
+        # 修复失败，返回原始响应
+        return ("partial_data", json_str)
+    else:
+        return ("error", "API返回格式错误")
 
 
 def build_messages_for_long(text: str, prompt: str = None) -> list:

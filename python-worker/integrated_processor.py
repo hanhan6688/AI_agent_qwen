@@ -82,16 +82,16 @@ def build_prompt_from_fields(extract_fields) -> str:
     
     return prompt
 
-def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path, 
+def process_single_pdf(file_path: str, config: Dict, temp_work_dir: Path, 
                         task_data_dir: Optional[Path] = None, 
                         original_filename: Optional[str] = None,
                         extract_fields: Optional[Dict] = None,
                         model_mode: str = "normal") -> Tuple[str, Dict]:
     """
-    处理单个PDF文件的完整流程
+    处理单个文件（PDF/JPG/PNG）的完整流程
     
     Args:
-        pdf_path: PDF文件的完整路径
+        file_path: 文件的完整路径（支持 PDF、JPG、PNG）
         config: 配置字典
         temp_work_dir: 临时工作目录
         task_data_dir: 任务数据目录（用于保存JSON结果）
@@ -100,51 +100,77 @@ def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path,
         model_mode: 模型模式
             - "normal": 普通版 - 智能路由（qwen3-vl-plus / qwen-long）
             - "pro": 专业版 - 统一使用 qwen3.5-plus
+            - "local": 本地模型 - 使用本地部署的模型（OpenAI 兼容 API）
     
     Returns:
         (status, result) 元组
     """
-    pdf_file = Path(pdf_path)
-    if not pdf_file.exists():
-        return "error", {"error": f"PDF文件不存在: {pdf_path}"}
+    input_file = Path(file_path)
+    if not input_file.exists():
+        return "error", {"error": f"文件不存在: {file_path}"}
     
-    # 用于保存JSON的文件名 - 使用PDF的UUID文件名，与input文件夹名称一致
-    json_filename = pdf_file.stem
+    # 检查文件类型
+    file_ext = input_file.suffix.lower()
+    supported_extensions = {'.pdf', '.jpg', '.jpeg', '.png'}
+    if file_ext not in supported_extensions:
+        return "error", {"error": f"不支持的文件类型: {file_ext}，支持的类型: {supported_extensions}"}
+    
+    # 用于保存JSON的文件名 - 使用文件的UUID文件名，与input文件夹名称一致
+    json_filename = input_file.stem
     
     try:
-        # 检查是否已存在该PDF对应的MinerU处理结果
+        # 检查是否已存在该文件对应的MinerU处理结果
         md_file = None
         if task_data_dir:
             mineru_output_base = task_data_dir / "input"
-            # 根据PDF文件名（UUID）查找对应的处理结果目录
-            pdf_uuid = pdf_file.stem  # PDF文件名就是UUID
-            expected_md = mineru_output_base / f"{pdf_uuid}.pdf-id" / "full.md"
-            if expected_md.exists():
-                md_file = expected_md
-                logger.info(f"✅ 发现已存在的MinerU处理结果: {md_file}")
-            else:
+            # 根据文件名（UUID）查找对应的处理结果目录
+            file_uuid = input_file.stem  # 文件名就是UUID
+            # 支持多种可能的目录命名模式 (pdf-id, jpg-id, jpeg-id, png-id)
+            possible_ids = [
+                f"{file_uuid}{file_ext}-id",  # 当前扩展名
+                f"{file_uuid}.pdf-id",  # 兼容旧数据
+            ]
+            for possible_id in possible_ids:
+                expected_md = mineru_output_base / possible_id / "full.md"
+                if expected_md.exists():
+                    md_file = expected_md
+                    logger.info(f"✅ 发现已存在的MinerU处理结果: {md_file}")
+                    break
+            
+            if not md_file and mineru_output_base.exists():
                 # 尝试其他可能的命名模式
-                if mineru_output_base.exists():
-                    for subdir in mineru_output_base.iterdir():
-                        if subdir.is_dir() and subdir.name.startswith(pdf_uuid):
-                            potential_md = subdir / "full.md"
-                            if potential_md.exists():
-                                md_file = potential_md
-                                logger.info(f"✅ 发现已存在的MinerU处理结果: {md_file}")
-                                break
+                for subdir in mineru_output_base.iterdir():
+                    if subdir.is_dir() and subdir.name.startswith(file_uuid):
+                        potential_md = subdir / "full.md"
+                        if potential_md.exists():
+                            md_file = potential_md
+                            logger.info(f"✅ 发现已存在的MinerU处理结果: {md_file}")
+                            break
         
         # 如果没有已存在的结果，则调用MinerU处理
         if not md_file:
-            logger.info(f"=== 步骤1: 上传PDF到MinerU - {pdf_file.name} ===")
+            # 兼容旧的 pdf 目录和新的 files 目录
+            old_pdf_dir = task_data_dir / "pdf" if task_data_dir else None
+            new_files_dir = task_data_dir / "files" if task_data_dir else None
+            
+            # 检查文件在哪个目录
+            actual_file_dir = None
+            if new_files_dir and (new_files_dir / input_file.name).exists():
+                actual_file_dir = new_files_dir
+            elif old_pdf_dir and (old_pdf_dir / input_file.name).exists():
+                actual_file_dir = old_pdf_dir
+            else:
+                actual_file_dir = new_files_dir  # 默认使用新目录
+            logger.info(f"=== 步骤1: 上传文件到MinerU - {input_file.name} ===")
             mineru_input_dir = temp_work_dir / "mineru_input"
             mineru_input_dir.mkdir(exist_ok=True)
             
-            # 创建临时PDF文件
-            temp_pdf = mineru_input_dir / pdf_file.name
-            shutil.copy2(pdf_file, temp_pdf)
+            # 创建临时文件
+            temp_file = mineru_input_dir / input_file.name
+            shutil.copy2(input_file, temp_file)
             
             # 上传并等待处理
-            batch_id = upload_batch([temp_pdf])
+            batch_id = upload_batch([temp_file])
             logger.info(f"批次ID: {batch_id}")
             
             # 等待MinerU处理完成
@@ -172,8 +198,9 @@ def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path,
             md_file = md_files[0]
             logger.info(f"找到Markdown文件: {md_file}")
         
-        # 步骤4: 使用Qwen3-VL提取信息
+        # 步骤4: 使用Qwen提取信息
         logger.info("=== 步骤4: 使用Qwen提取信息 ===")
+        logger.info(f"处理文件: {input_file.name}, 类型: {file_ext}")
         # 构建动态提示词
         prompt = build_prompt_from_fields(extract_fields)
         # 安全地记录提取字段信息
@@ -189,7 +216,12 @@ def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path,
             logger.info("提取字段: 默认")
         
         # 记录模型模式
-        mode_text = "专业版 (qwen3.5-plus)" if model_mode == "pro" else "普通版 (智能路由)"
+        if model_mode == "local":
+            mode_text = "本地模型 (OpenAI 兼容 API)"
+        elif model_mode == "pro":
+            mode_text = "专业版 (qwen3.5-plus)"
+        else:
+            mode_text = "普通版 (智能路由)"
         logger.info(f"模型模式: {mode_text}")
         
         status, result = extract_once(str(md_file), prompt=prompt, model_mode=model_mode)
@@ -204,7 +236,8 @@ def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path,
                 # 构建完整的JSON结果
                 json_result = {
                     "status": "success",
-                    "source_file": original_filename or pdf_file.name,
+                    "source_file": original_filename or input_file.name,
+                    "file_type": file_ext,
                     "extracted_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "data": result
                 }
@@ -216,20 +249,20 @@ def process_single_pdf(pdf_path: str, config: Dict, temp_work_dir: Path,
                 # 添加JSON路径到结果
                 result["_json_path"] = str(json_path)
             
-            logger.info(f"=== 处理完成: {pdf_file.name} ===")
+            logger.info(f"=== 处理完成: {input_file.name} ===")
             return "success", result
         elif status == "partial_data":
-            logger.warning(f"部分数据提取成功: {pdf_file.name}")
+            logger.warning(f"部分数据提取成功: {input_file.name}")
             return "partial_success", {
                 "warning": "部分数据提取成功",
                 "raw_data": result
             }
         else:
-            logger.error(f"Qwen3-VL提取失败: {pdf_file.name}")
-            return "error", {"error": f"Qwen3-VL提取失败: {result}"}
+            logger.error(f"Qwen提取失败: {input_file.name}")
+            return "error", {"error": f"Qwen提取失败: {result}"}
             
     except Exception as e:
-        logger.error(f"处理PDF失败 {pdf_file.name}: {str(e)}", exc_info=True)
+        logger.error(f"处理文件失败 {input_file.name}: {str(e)}", exc_info=True)
         return "error", {"error": str(e)}
 
 def main():
@@ -252,13 +285,29 @@ def main():
         task_id = input_data.get('taskId')
         task_name = input_data.get('taskName')
         file_info = input_data.get('fileInfo', {})
-        pdf_path = file_info.get('filePath')
+        file_path = file_info.get('filePath')
         original_filename = file_info.get('fileName')
         task_data_dir_str = file_info.get('taskDataDir')
         model_mode = input_data.get('modelMode', 'normal')  # 获取模型模式，默认普通版
         
-        if not pdf_path:
+        if not file_path:
             raise ValueError("filePath不能为空")
+        
+        # 兼容处理：如果传入的是相对文件名，尝试在 files 或 pdf 目录中查找
+        task_data_dir = Path(task_data_dir_str) if task_data_dir_str else None
+        if task_data_dir and not Path(file_path).is_absolute():
+            # 新目录结构：files/
+            new_path = task_data_dir / "files" / file_path
+            # 旧目录结构：pdf/
+            old_path = task_data_dir / "pdf" / file_path
+            
+            if new_path.exists():
+                file_path = str(new_path)
+            elif old_path.exists():
+                file_path = str(old_path)
+            else:
+                # 默认使用新路径
+                file_path = str(new_path)
         
         # 解析提取字段配置
         extract_fields = None
@@ -270,7 +319,7 @@ def main():
                 logger.warning(f"解析提取字段JSON失败: {e}")
         
         mode_text = "专业版" if model_mode == "pro" else "普通版"
-        logger.info(f"开始处理任务: taskId={task_id}, taskName={task_name}, file={pdf_path}, 模式={mode_text}")
+        logger.info(f"开始处理任务: taskId={task_id}, taskName={task_name}, file={file_path}, 模式={mode_text}")
         
         # 加载配置
         config = load_config()
@@ -279,13 +328,10 @@ def main():
         temp_work_dir = Path(f"./temp_task_{task_id}")
         temp_work_dir.mkdir(exist_ok=True)
         
-        # 任务数据目录
-        task_data_dir = Path(task_data_dir_str) if task_data_dir_str else None
-        
         try:
-            # 处理PDF
+            # 处理文件（支持 PDF/JPG/PNG）
             status, result = process_single_pdf(
-                pdf_path, config, temp_work_dir, 
+                file_path, config, temp_work_dir, 
                 task_data_dir=task_data_dir,
                 original_filename=original_filename,
                 extract_fields=extract_fields,

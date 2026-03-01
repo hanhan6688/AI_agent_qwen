@@ -24,11 +24,11 @@
             </svg>
           </div>
           <p class="upload-text">拖拽文件到此处或点击上传</p>
-          <p class="upload-hint">支持 PDF 格式，最大 100MB，可同时上传多个文件</p>
+          <p class="upload-hint">支持 PDF、JPG、PNG 格式，最大 100MB，可同时上传多个文件</p>
           <input
             type="file"
             ref="fileInput"
-            accept=".pdf"
+            accept=".pdf,.jpg,.jpeg,.png"
             multiple
             style="display: none"
             @change="handleFileSelect"
@@ -38,7 +38,7 @@
         <!-- 文件列表 -->
         <div v-if="selectedFiles.length > 0" class="file-list">
           <div v-for="(file, index) in selectedFiles" :key="index" class="file-info">
-            <div class="file-icon">📄</div>
+            <div class="file-icon">{{ getFileIcon(file.name) }}</div>
             <div class="file-details">
               <p class="file-name">{{ file.name }}</p>
               <p class="file-size">{{ formatFileSize(file.size) }}</p>
@@ -87,6 +87,17 @@
               <span class="mode-text">
                 <span class="mode-title">专业版</span>
                 <span class="mode-desc">更强推理 (qwen3.5-plus, 991K上下文)</span>
+              </span>
+            </button>
+            <button 
+              class="mode-btn local" 
+              :class="{ active: modelMode === 'local' }"
+              @click="modelMode = 'local'"
+            >
+              <span class="mode-icon">🖥️</span>
+              <span class="mode-text">
+                <span class="mode-title">本地模型</span>
+                <span class="mode-desc">私有部署 (OpenAI 兼容 API)</span>
               </span>
             </button>
           </div>
@@ -174,7 +185,11 @@ const handleDragLeave = () => {
 
 const handleDrop = (event) => {
   dragover.value = false
-  const files = Array.from(event.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.pdf'))
+  const allowedExtensions = ['.pdf', '.jpg', '.jpeg', '.png']
+  const files = Array.from(event.dataTransfer.files).filter(f => {
+    const ext = f.name.toLowerCase().substring(f.name.lastIndexOf('.'))
+    return allowedExtensions.includes(ext)
+  })
   if (files.length > 0) {
     addFiles(files)
   }
@@ -186,7 +201,11 @@ const triggerFileInput = () => {
 }
 
 const handleFileSelect = (event) => {
-  const files = Array.from(event.target.files).filter(f => f.name.toLowerCase().endsWith('.pdf'))
+  const allowedExtensions = ['.pdf', '.jpg', '.jpeg', '.png']
+  const files = Array.from(event.target.files).filter(f => {
+    const ext = f.name.toLowerCase().substring(f.name.lastIndexOf('.'))
+    return allowedExtensions.includes(ext)
+  })
   if (files.length > 0) {
     addFiles(files)
   }
@@ -205,7 +224,10 @@ const addFiles = (files) => {
   selectedFiles.value.push(...validFiles)
 
   if (selectedFiles.value.length > 0 && !taskName.value) {
-    taskName.value = validFiles[0].name.replace('.pdf', '')
+    // 移除文件扩展名作为任务名称
+    const firstName = validFiles[0].name
+    const lastDotIndex = firstName.lastIndexOf('.')
+    taskName.value = lastDotIndex > 0 ? firstName.substring(0, lastDotIndex) : firstName
   }
 
   showMessage(`已添加 ${validFiles.length} 个文件`, 'success')
@@ -238,6 +260,15 @@ const formatFileSize = (bytes) => {
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB'
   return (bytes / (1024 * 1024)).toFixed(2) + ' MB'
+}
+
+// 获取文件图标
+const getFileIcon = (filename) => {
+  const ext = filename.toLowerCase().substring(filename.lastIndexOf('.'))
+  if (ext === '.pdf') return '📄'
+  if (ext === '.jpg' || ext === '.jpeg') return '🖼️'
+  if (ext === '.png') return '🖼️'
+  return '📄'
 }
 
 // 提交任务
@@ -560,6 +591,12 @@ const showMessage = (text, type = 'success') => {
     border-color: #9f7aea;
     background: #faf5ff;
     box-shadow: 0 0 0 3px rgba(159, 122, 234, 0.2);
+  }
+
+  &.local.active {
+    border-color: #38a169;
+    background: #f0fff4;
+    box-shadow: 0 0 0 3px rgba(56, 161, 105, 0.2);
   }
 }
 
