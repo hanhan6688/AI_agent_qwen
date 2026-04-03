@@ -24,23 +24,24 @@ logger = logging.getLogger('IntegratedProcessor')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_process import upload_batch, wait_until_done, fetch_and_download, BATCH_SIZE
-from qwen_process_url_new import extract_once, preprocess_context, MODEL_PRO
+from qwen_process_url_new import extract_once
 
-def load_config():
+def load_config(model_mode: str = "normal"):
     """加载环境变量"""
     from dotenv import load_dotenv
     load_dotenv()
     
     config = {
         'MINERU_API_KEY': os.getenv('MINERU_API_KEY'),
-        'DASHSCOPE_API_KEY': os.getenv('DASHSCOPE_API_KEY'),
         'mineru_base_url': 'https://mineru.net/api/v4',
         'batch_size': 200
     }
+    if model_mode != "local":
+        config['DASHSCOPE_API_KEY'] = os.getenv('DASHSCOPE_API_KEY')
     
     if not config['MINERU_API_KEY']:
         raise RuntimeError('MINERU_API_KEY环境变量未设置')
-    if not config['DASHSCOPE_API_KEY']:
+    if model_mode != "local" and not config.get('DASHSCOPE_API_KEY'):
         raise RuntimeError('DASHSCOPE_API_KEY环境变量未设置')
     
     return config
@@ -86,7 +87,9 @@ def process_single_pdf(file_path: str, config: Dict, temp_work_dir: Path,
                         task_data_dir: Optional[Path] = None, 
                         original_filename: Optional[str] = None,
                         extract_fields: Optional[Dict] = None,
-                        model_mode: str = "normal") -> Tuple[str, Dict]:
+                        model_mode: str = "normal",
+                        model_params: Optional[Dict] = None,
+                        qwen_config: Optional[Dict] = None) -> Tuple[str, Dict]:
     """
     处理单个文件（PDF/JPG/PNG）的完整流程
     
@@ -224,7 +227,13 @@ def process_single_pdf(file_path: str, config: Dict, temp_work_dir: Path,
             mode_text = "普通版 (智能路由)"
         logger.info(f"模型模式: {mode_text}")
         
-        status, result = extract_once(str(md_file), prompt=prompt, model_mode=model_mode)
+        status, result = extract_once(
+            str(md_file),
+            prompt=prompt,
+            model_mode=model_mode,
+            model_params=model_params or {},
+            qwen_config=qwen_config or {}
+        )
         
         if status == "success":
             # 保存JSON到任务目录
@@ -289,6 +298,8 @@ def main():
         original_filename = file_info.get('fileName')
         task_data_dir_str = file_info.get('taskDataDir')
         model_mode = input_data.get('modelMode', 'normal')  # 获取模型模式，默认普通版
+        model_params = input_data.get('modelParams', {}) or {}
+        qwen_config = input_data.get('qwenConfig', {}) or {}
         
         if not file_path:
             raise ValueError("filePath不能为空")
@@ -318,11 +329,16 @@ def main():
             except json.JSONDecodeError as e:
                 logger.warning(f"解析提取字段JSON失败: {e}")
         
-        mode_text = "专业版" if model_mode == "pro" else "普通版"
+        if model_mode == "local":
+            mode_text = "本地模型"
+        elif model_mode == "pro":
+            mode_text = "专业版"
+        else:
+            mode_text = "普通版"
         logger.info(f"开始处理任务: taskId={task_id}, taskName={task_name}, file={file_path}, 模式={mode_text}")
         
         # 加载配置
-        config = load_config()
+        config = load_config(model_mode=model_mode)
         
         # 创建临时工作目录
         temp_work_dir = Path(f"./temp_task_{task_id}")
@@ -335,7 +351,9 @@ def main():
                 task_data_dir=task_data_dir,
                 original_filename=original_filename,
                 extract_fields=extract_fields,
-                model_mode=model_mode
+                model_mode=model_mode,
+                model_params=model_params,
+                qwen_config=qwen_config
             )
             
             # 从结果中获取实际使用的模型
@@ -350,6 +368,8 @@ def main():
                     "confidence": 0.95,
                     "model": actual_model,
                     "model_mode": model_mode,
+                    "generation_config": result.get("generation_config", {}),
+                    "model_route": result.get("_model_route", {}),
                     "mineru_processed": True,
                     "task_data_dir": str(task_data_dir) if task_data_dir else None
                 }
@@ -361,6 +381,8 @@ def main():
                     "confidence": 0.7,
                     "model": actual_model,
                     "model_mode": model_mode,
+                    "generation_config": result.get("generation_config", {}),
+                    "model_route": result.get("_model_route", {}),
                     "task_data_dir": str(task_data_dir) if task_data_dir else None
                 }
             else:

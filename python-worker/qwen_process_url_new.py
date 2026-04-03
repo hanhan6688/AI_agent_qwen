@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 import os
 import time
-import random
 import json
 import re
 import logging
 import hashlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from dashscope import MultiModalConversation
 from pathlib import Path
@@ -15,7 +15,7 @@ from typing import Tuple, Optional, Dict, Any
 
 # 导入本地模型客户端
 try:
-    from local_model_client import LocalModelClient, LocalModelConfig, create_client
+    from local_model_client import LocalModelClient, LocalModelConfig
     LOCAL_MODEL_AVAILABLE = True
 except ImportError:
     LOCAL_MODEL_AVAILABLE = False
@@ -61,6 +61,89 @@ TOKEN_BUCKET = MAX_TPM
 REQUEST_BUCKET = MAX_RPM
 LAST_REFILL_TIME = time.time()
 TOKEN_LOCK = threading.Lock()
+
+
+def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_generation_config(model_params: Optional[Dict[str, Any]],
+                                 qwen_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    model_params = model_params or {}
+    defaults = (qwen_config or {}).get("generationDefaults", {})
+
+    config = {
+        "temperature": _to_float(model_params.get("temperature"), _to_float(defaults.get("temperature"), 0.0)),
+        "top_p": _to_float(
+            model_params.get("top_p", model_params.get("topP")),
+            _to_float(defaults.get("topP"), 0.9)
+        ),
+        "top_k": _to_int(
+            model_params.get("top_k", model_params.get("topK")),
+            _to_int(defaults.get("topK"), 20)
+        ),
+        "max_tokens": _to_int(
+            model_params.get("max_tokens", model_params.get("maxTokens")),
+            _to_int(defaults.get("maxTokens"), 2048)
+        ),
+        "repetition_penalty": _to_float(
+            model_params.get("repetition_penalty", model_params.get("repetitionPenalty")),
+            _to_float(defaults.get("repetitionPenalty"), 1.0)
+        ),
+        "presence_penalty": _to_float(
+            model_params.get("presence_penalty", model_params.get("presencePenalty"))
+        ),
+        "frequency_penalty": _to_float(
+            model_params.get("frequency_penalty", model_params.get("frequencyPenalty"))
+        ),
+        "seed": _to_int(model_params.get("seed")),
+        "timeout": _to_int(model_params.get("timeout"), _to_int(defaults.get("timeout"), 600))
+    }
+
+    return {key: value for key, value in config.items() if value is not None}
+
+
+def _normalize_local_model_config(model_params: Optional[Dict[str, Any]],
+                                  qwen_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    model_params = model_params or {}
+    local_defaults = (qwen_config or {}).get("localModelDefaults", {})
+    generation_config = _normalize_generation_config(model_params, qwen_config)
+
+    config = {
+        "enabled": True,
+        "base_url": model_params.get("baseUrl") or local_defaults.get("baseUrl"),
+        "api_key": model_params.get("apiKey") or local_defaults.get("apiKey") or "EMPTY",
+        "model": model_params.get("model") or local_defaults.get("model"),
+        "provider": model_params.get("provider") or local_defaults.get("provider") or "openai-compatible",
+        "vision_enabled": _to_bool(
+            model_params.get("visionEnabled", local_defaults.get("visionEnabled")),
+            True
+        ),
+    }
+    config.update(generation_config)
+    return config
 
 
 # ============== 智能模型路由缓存 ==============
@@ -398,7 +481,9 @@ def build_messages(text: str, img_abs_paths: list[str], prompt: str = None) -> l
     
     return [system_msg, user_msg]
 
-def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal") -> tuple:
+def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal",
+                 model_params: Optional[Dict[str, Any]] = None,
+                 qwen_config: Optional[Dict[str, Any]] = None) -> tuple:
     """使用智能模型路由进行提取
     
     Args:
@@ -455,22 +540,27 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal") -
             if not LOCAL_MODEL_AVAILABLE:
                 raise RuntimeError("本地模型功能不可用，请确保 openai 库已安装: pip install openai")
             
-            local_config = LocalModelConfig.load_from_env()
+            local_config = LocalModelConfig.load_from_env(
+                defaults=(qwen_config or {}).get("localModelDefaults", {}),
+                overrides=_normalize_local_model_config(model_params, qwen_config)
+            )
             if not local_config.get("enabled"):
                 logger.warning("本地模型未启用，将尝试加载配置...")
             
             selected_model = local_config.get("model", "local-model")
+            generation_config = local_config.generation_config()
             route_info = {
                 "model": selected_model,
                 "has_figures": len(abs_imgs) > 0,
                 "reason": f"本地模型模式 → 使用 {selected_model}（OpenAI 兼容 API）",
                 "base_url": local_config.get("base_url"),
-                "preset": local_config.get("preset")
+                "provider": local_config.get("provider")
             }
             logger.info(f"🖥️ 本地模型模式: {selected_model} @ {local_config.get('base_url')}")
         elif model_mode == "pro":
             # 专业版：统一使用 qwen3.5-plus
             selected_model = MODEL_PRO
+            generation_config = _normalize_generation_config(model_params, qwen_config)
             route_info = {
                 "model": selected_model,
                 "has_figures": len(abs_imgs) > 0,
@@ -480,6 +570,7 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal") -
         else:
             # 普通版：智能路由
             selected_model, route_info = _model_router.route(raw_text, abs_imgs)
+            generation_config = _normalize_generation_config(model_params, qwen_config)
             logger.info(f"📊 智能路由决策: 模型={selected_model}, 原因={route_info.get('reason', 'N/A')}")
         
         # 4. 根据模型类型进行文本预处理（不同模型有不同的上下文限制）
@@ -511,20 +602,22 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal") -
         # 6. 调用模型 API
         if model_mode == "local":
             # 本地模型调用
-            return _call_local_model(text, abs_imgs, prompt, route_info)
+            return _call_local_model(text, abs_imgs, prompt, route_info, local_config)
         else:
             # 云端模型调用
-            return _call_cloud_model(text, abs_imgs, prompt, selected_model, route_info, estimated_tokens)
+            return _call_cloud_model(
+                text, abs_imgs, prompt, selected_model, route_info, estimated_tokens, generation_config
+            )
             
     except Exception as e:
         logger.error(f"处理失败: {e}")
         return ("error", str(e))
 
 
-def _call_local_model(text: str, abs_imgs: list, prompt: str, route_info: dict) -> tuple:
+def _call_local_model(text: str, abs_imgs: list, prompt: str, route_info: dict,
+                      local_config: LocalModelConfig) -> tuple:
     """调用本地模型"""
     try:
-        local_config = LocalModelConfig.load_from_env()
         client = LocalModelClient(local_config)
         
         logger.info(f"🚀 调用本地模型: {local_config.get('model')}")
@@ -543,8 +636,10 @@ def _call_local_model(text: str, abs_imgs: list, prompt: str, route_info: dict) 
                 "has_figures": route_info.get("has_figures"),
                 "reason": route_info.get("reason"),
                 "base_url": route_info.get("base_url"),
+                "provider": route_info.get("provider"),
                 "text_length": len(text)
             }
+            result["generation_config"] = result.get("generation_config", client.generation_config_used())
             # 如果有思考内容，记录到日志
             if result.get("_local_model", {}).get("reasoning"):
                 logger.info(f"💭 模型思考内容已记录")
@@ -559,13 +654,16 @@ def _call_local_model(text: str, abs_imgs: list, prompt: str, route_info: dict) 
                     "has_figures": route_info.get("has_figures"),
                     "reason": route_info.get("reason"),
                     "base_url": route_info.get("base_url"),
+                    "provider": route_info.get("provider"),
                     "text_length": len(text)
                 }
                 repaired_obj["_local_model"] = {
                     "model": route_info.get("model"),
                     "base_url": route_info.get("base_url"),
+                    "provider": route_info.get("provider"),
                     "reasoning": result.get("reasoning")
                 }
+                repaired_obj["generation_config"] = client.generation_config_used()
                 return ("success", repaired_obj)
             return ("partial_data", result)
         else:
@@ -576,12 +674,14 @@ def _call_local_model(text: str, abs_imgs: list, prompt: str, route_info: dict) 
         return ("error", str(e))
 
 
-def _call_cloud_model(text: str, abs_imgs: list, prompt: str, selected_model: str, 
-                       route_info: dict, estimated_tokens: int) -> tuple:
+def _call_cloud_model(text: str, abs_imgs: list, prompt: str, selected_model: str,
+                       route_info: dict, estimated_tokens: int,
+                       generation_config: Optional[Dict[str, Any]] = None) -> tuple:
     """调用云端模型（DashScope API）"""
     # 添加重试机制
     max_retries = 3
     rsp = None
+    generation_config = generation_config or {}
     for attempt in range(max_retries):
         try:
             wait_for_tokens(estimated_tokens)
@@ -594,12 +694,18 @@ def _call_cloud_model(text: str, abs_imgs: list, prompt: str, selected_model: st
                 # qwen-vl 使用多模态格式
                 messages = build_messages(text, abs_imgs, prompt=prompt)
             
-            rsp = MultiModalConversation.call(
-                model=selected_model,
-                messages=messages,
-                temperature=0,
-                response_format={"type": "json_object"}
-            )
+            call_kwargs = {
+                "model": selected_model,
+                "messages": messages,
+                "temperature": generation_config.get("temperature", 0),
+                "response_format": {"type": "json_object"}
+            }
+            if generation_config.get("top_p") is not None:
+                call_kwargs["top_p"] = generation_config.get("top_p")
+            if generation_config.get("max_tokens") is not None:
+                call_kwargs["max_tokens"] = generation_config.get("max_tokens")
+
+            rsp = MultiModalConversation.call(**call_kwargs)
             if rsp.status_code == 200:
                 break  # 成功则退出重试循环
             else:
@@ -630,6 +736,7 @@ def _call_cloud_model(text: str, abs_imgs: list, prompt: str, selected_model: st
                 "reason": route_info.get("reason"),
                 "text_length": len(text)
             }
+            result["generation_config"] = generation_config
             return ("success", result)
         except json.JSONDecodeError:
             pass
@@ -643,10 +750,14 @@ def _call_cloud_model(text: str, abs_imgs: list, prompt: str, selected_model: st
                 "reason": route_info.get("reason"),
                 "text_length": len(text)
             }
+            repaired_obj["generation_config"] = generation_config
             return ("success", repaired_obj)
         
         # 修复失败，返回原始响应
-        return ("partial_data", json_str)
+        return ("partial_data", {
+            "raw_content": json_str,
+            "generation_config": generation_config
+        })
     else:
         return ("error", "API返回格式错误")
 

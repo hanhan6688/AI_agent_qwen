@@ -54,15 +54,15 @@ spring:
 
 # 文件存储配置
 file:
-  upload-dir: C:/Users/1/Desktop/AI_agent_qwen-main/data/uploads
-  output-dir: C:/Users/1/Desktop/AI_agent_qwen-main/data/outputs
-  data-dir: C:/Users/1/Desktop/AI_agent_qwen-main/data
+  upload-dir: ${APP_UPLOAD_DIR:../data/uploads}
+  output-dir: ${APP_OUTPUT_DIR:../data/outputs}
+  data-dir: ${APP_DATA_DIR:../data}
 
 # Python工作脚本路径
 python:
-  worker-dir: C:/Users/1/Desktop/AI_agent_qwen-main/python-worker
-  script-path: integrated_processor.py
-  python-path: C:/Users/1/anaconda3/envs/fastApi/python.exe
+  worker-dir: ${PYTHON_WORKER_DIR:../python-worker}
+  script-path: ${PYTHON_SCRIPT_PATH:integrated_processor.py}
+  python-path: ${PYTHON_BIN:python3}
   mineru-timeout: 3600  # MinerU处理超时时间（秒），默认1小时
 
 # Qwen智能提取配置
@@ -76,6 +76,17 @@ qwen:
   max-tpm: 1000000        # TPM限制
   max-images: 15          # 单次最大图片数
   max-context-length: 150000  # 最大上下文长度
+  default-temperature: ${QWEN_DEFAULT_TEMPERATURE:0.1}
+  default-top-p: ${QWEN_DEFAULT_TOP_P:0.9}
+  default-top-k: ${QWEN_DEFAULT_TOP_K:20}
+  default-max-tokens: ${QWEN_DEFAULT_MAX_TOKENS:2048}
+  default-repetition-penalty: ${QWEN_DEFAULT_REPETITION_PENALTY:1.0}
+  default-request-timeout: ${QWEN_DEFAULT_REQUEST_TIMEOUT:600}
+  local-base-url: ${LOCAL_MODEL_BASE_URL:http://127.0.0.1:8000/v1}
+  local-api-key: ${LOCAL_MODEL_API_KEY:EMPTY}
+  local-model: ${LOCAL_MODEL_NAME:Qwen/Qwen2.5-VL-7B-Instruct}
+  local-provider: ${LOCAL_MODEL_PROVIDER:openai-compatible}
+  local-vision-enabled: ${LOCAL_MODEL_VISION_ENABLED:true}
 
 # 日志配置
 logging:
