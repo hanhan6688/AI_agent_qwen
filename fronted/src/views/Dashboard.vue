@@ -101,6 +101,102 @@
               </span>
             </button>
           </div>
+          <p class="form-tip">
+            普通版和专业版走云端 Qwen，本地模型支持接入 vLLM、LM Studio、Ollama 等 OpenAI 兼容接口。
+          </p>
+        </div>
+
+        <div v-if="modelMode === 'local'" class="form-group">
+          <label>本地模型连接</label>
+          <div class="param-grid local-grid">
+            <input
+              v-model="modelParams.baseUrl"
+              type="text"
+              class="form-input"
+              placeholder="Base URL，例如：http://127.0.0.1:8000/v1"
+            />
+            <input
+              v-model="modelParams.model"
+              type="text"
+              class="form-input"
+              placeholder="模型名称，例如：Qwen/Qwen2.5-VL-7B-Instruct"
+            />
+            <input
+              v-model="modelParams.apiKey"
+              type="text"
+              class="form-input"
+              placeholder="API Key，可留 EMPTY"
+            />
+            <select v-model="modelParams.provider" class="form-input">
+              <option value="openai-compatible">OpenAI Compatible</option>
+              <option value="vllm">vLLM</option>
+              <option value="ollama">Ollama</option>
+              <option value="lm-studio">LM Studio</option>
+            </select>
+          </div>
+          <label class="switch-row">
+            <input v-model="modelParams.visionEnabled" type="checkbox" />
+            <span>当前本地模型支持图片/图表输入</span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label>推理参数</label>
+          <div class="param-grid">
+            <input
+              v-model="modelParams.temperature"
+              type="number"
+              min="0"
+              max="2"
+              step="0.1"
+              class="form-input"
+              placeholder="temperature"
+            />
+            <input
+              v-model="modelParams.topP"
+              type="number"
+              min="0"
+              max="1"
+              step="0.05"
+              class="form-input"
+              placeholder="top_p"
+            />
+            <input
+              v-model="modelParams.topK"
+              type="number"
+              min="1"
+              step="1"
+              class="form-input"
+              placeholder="top_k"
+            />
+            <input
+              v-model="modelParams.maxTokens"
+              type="number"
+              min="1"
+              step="1"
+              class="form-input"
+              placeholder="max_tokens"
+            />
+            <input
+              v-model="modelParams.repetitionPenalty"
+              type="number"
+              min="0"
+              step="0.1"
+              class="form-input"
+              placeholder="repetition_penalty"
+            />
+            <input
+              v-model="modelParams.timeout"
+              type="number"
+              min="30"
+              step="10"
+              class="form-input"
+              placeholder="timeout(秒)"
+            />
+          </div>
+          <p class="form-tip">
+            `temperature` 越低越稳定，`top_p` / `top_k` 越大越发散，`max_tokens` 控制输出长度。
+          </p>
         </div>
 
         <div class="form-group">
@@ -166,6 +262,20 @@ const modelMode = ref('normal')  // 默认普通版
 const uploading = ref(false)
 const message = ref('')
 const messageType = ref('')
+const createDefaultModelParams = () => ({
+  baseUrl: 'http://127.0.0.1:8000/v1',
+  apiKey: 'EMPTY',
+  model: 'Qwen/Qwen2.5-VL-7B-Instruct',
+  provider: 'openai-compatible',
+  visionEnabled: true,
+  temperature: 0.1,
+  topP: 0.9,
+  topK: 20,
+  maxTokens: 2048,
+  repetitionPenalty: 1.0,
+  timeout: 600
+})
+const modelParams = ref(createDefaultModelParams())
 
 // 提取字段配置
 const extractFields = ref([
@@ -271,6 +381,67 @@ const getFileIcon = (filename) => {
   return '📄'
 }
 
+const parseNumber = (value, fallback = null) => {
+  if (value === '' || value === null || value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+const validateModelParams = () => {
+  const payload = modelParams.value
+
+  if (modelMode.value === 'local' && !payload.baseUrl.trim()) {
+    return '本地模型模式下必须填写 Base URL'
+  }
+
+  if (modelMode.value === 'local' && !payload.model.trim()) {
+    return '本地模型模式下必须填写模型名称'
+  }
+
+  const temperature = parseNumber(payload.temperature)
+  if (temperature !== null && (temperature < 0 || temperature > 2)) {
+    return 'temperature 取值范围应为 0 - 2'
+  }
+
+  const topP = parseNumber(payload.topP)
+  if (topP !== null && (topP <= 0 || topP > 1)) {
+    return 'top_p 取值范围应为 0 - 1，且不能为 0'
+  }
+
+  const topK = parseNumber(payload.topK)
+  if (topK !== null && topK < 1) {
+    return 'top_k 必须大于等于 1'
+  }
+
+  const maxTokens = parseNumber(payload.maxTokens)
+  if (maxTokens !== null && maxTokens < 1) {
+    return 'max_tokens 必须大于等于 1'
+  }
+
+  return ''
+}
+
+const buildModelParamsPayload = () => {
+  const payload = {
+    temperature: parseNumber(modelParams.value.temperature, 0.1),
+    topP: parseNumber(modelParams.value.topP, 0.9),
+    topK: parseNumber(modelParams.value.topK, 20),
+    maxTokens: parseNumber(modelParams.value.maxTokens, 2048),
+    repetitionPenalty: parseNumber(modelParams.value.repetitionPenalty, 1.0),
+    timeout: parseNumber(modelParams.value.timeout, 600)
+  }
+
+  if (modelMode.value === 'local') {
+    payload.baseUrl = modelParams.value.baseUrl.trim()
+    payload.apiKey = modelParams.value.apiKey.trim() || 'EMPTY'
+    payload.model = modelParams.value.model.trim()
+    payload.provider = modelParams.value.provider
+    payload.visionEnabled = Boolean(modelParams.value.visionEnabled)
+  }
+
+  return payload
+}
+
 // 提交任务
 const submitTask = async () => {
   try {
@@ -285,6 +456,12 @@ const submitTask = async () => {
 
     if (!taskName.value.trim()) {
       showMessage('请输入任务名称', 'error')
+      return
+    }
+
+    const modelParamError = validateModelParams()
+    if (modelParamError) {
+      showMessage(modelParamError, 'error')
       return
     }
 
@@ -309,6 +486,7 @@ const submitTask = async () => {
     
     // 添加模型模式
     formData.append('modelMode', modelMode.value)
+    formData.append('modelParams', JSON.stringify(buildModelParamsPayload()))
 
     // 添加所有文件
     selectedFiles.value.forEach((file, index) => {
@@ -548,6 +726,13 @@ const showMessage = (text, type = 'success') => {
   }
 }
 
+.form-tip {
+  margin: 0.45rem 0 0;
+  color: #718096;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
 /* 提取字段 */
 .extract-fields {
   display: flex;
@@ -619,6 +804,32 @@ const showMessage = (text, type = 'success') => {
 .mode-desc {
   font-size: 0.8rem;
   color: #718096;
+}
+
+.param-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.local-grid {
+  margin-bottom: 0.75rem;
+}
+
+.switch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: #2d3748;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 900px) {
+  .model-mode-selector,
+  .param-grid {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
 }
 
 .field-row {

@@ -8,6 +8,8 @@
 - PDF 文档上传
 - AI 智能提取文档指标（基于 MinerU + Qwen3-VL）
 - **智能路由模型选择**（自动选择最优模型）
+- **支持本地部署模型接入**（OpenAI 兼容 API，如 vLLM、LM Studio、Ollama）
+- **支持可调推理参数**（`temperature`、`top_p`、`top_k`、`max_tokens`、`repetition_penalty` 等）
 - 异步任务处理（Redis 队列）
 - JSON 结果导出
 - 任务状态实时追踪
@@ -43,6 +45,28 @@
 | RPM | 30,000 次/分钟 |
 | TPM | 5M tokens/分钟 |
 | 优势 | 更强的推理能力，适合复杂文档 |
+
+### 本地模型模式
+
+本地模式支持把你自己部署的模型直接挂到系统里，前端可按任务传入以下参数：
+
+| 参数 | 说明 |
+|-----|------|
+| `baseUrl` | OpenAI 兼容服务地址，如 `http://127.0.0.1:8000/v1` |
+| `model` | 本地模型名，如 `Qwen/Qwen2.5-VL-7B-Instruct` |
+| `apiKey` | 本地服务密钥，没有时可填 `EMPTY` |
+| `temperature` | 采样温度，越低越稳定 |
+| `top_p` / `top_k` | 采样范围控制 |
+| `max_tokens` | 最大输出长度 |
+| `repetition_penalty` | 重复惩罚 |
+| `visionEnabled` | 是否把图片一起传给本地视觉模型 |
+
+适配场景：
+
+- 本地 vLLM 启动的 Qwen/Qwen-VL
+- LM Studio 的 OpenAI compatible server
+- Ollama 的兼容接口
+- 其他实现了 OpenAI Chat Completions 的推理服务
 
 ### 模式选择建议
 
@@ -89,6 +113,7 @@ AI_agent_qwen/
 ├── python-worker/         # Python AI 处理服务
 │   ├── integrated_processor.py    # 集成处理器
 │   ├── qwen_process_url_new.py    # Qwen 处理模块（含智能路由）
+│   ├── local_model_client.py      # 本地模型 OpenAI 兼容客户端
 │   ├── data_process.py            # 数据处理模块
 │   └── prompt.txt                 # 提取提示词模板
 ├── docker-compose.yml     # Docker 编排配置
@@ -208,8 +233,35 @@ DASHSCOPE_API_KEY=your_dashscope_api_key_here
 # OpenAI API（可选）
 OPENAI_API_KEY=your_openai_api_key_here
 
+# 本地模型（可选，前端也可按任务覆盖）
+LOCAL_MODEL_BASE_URL=http://127.0.0.1:8000/v1
+LOCAL_MODEL_API_KEY=EMPTY
+LOCAL_MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct
+LOCAL_MODEL_PROVIDER=openai-compatible
+LOCAL_MODEL_VISION_ENABLED=true
+LOCAL_MODEL_TEMPERATURE=0.1
+LOCAL_MODEL_TOP_P=0.9
+LOCAL_MODEL_TOP_K=20
+LOCAL_MODEL_MAX_TOKENS=2048
+LOCAL_MODEL_REPETITION_PENALTY=1.0
+LOCAL_MODEL_TIMEOUT=600
+
 # MinerU API
 MINERU_API_KEY=your_mineru_api_key_here
+```
+
+### 后端可选环境变量
+
+```env
+APP_DATA_DIR=../data
+APP_UPLOAD_DIR=../data/uploads
+APP_OUTPUT_DIR=../data/outputs
+PYTHON_WORKER_DIR=../python-worker
+PYTHON_BIN=python3
+QWEN_DEFAULT_TEMPERATURE=0.1
+QWEN_DEFAULT_TOP_P=0.9
+QWEN_DEFAULT_TOP_K=20
+QWEN_DEFAULT_MAX_TOKENS=2048
 ```
 
 ## 工作流程

@@ -56,4 +56,59 @@ public class QwenConfig {
      * 最大上下文长度
      */
     private int maxContextLength = 150000;
+
+    /**
+     * 默认温度参数
+     */
+    private double defaultTemperature = 0.1D;
+
+    /**
+     * 默认 top-p 参数
+     */
+    private double defaultTopP = 0.9D;
+
+    /**
+     * 默认 top-k 参数
+     */
+    private int defaultTopK = 20;
+
+    /**
+     * 默认最大输出 token 数
+     */
+    private int defaultMaxTokens = 2048;
+
+    /**
+     * 默认重复惩罚
+     */
+    private double defaultRepetitionPenalty = 1.0D;
+
+    /**
+     * 默认请求超时（秒）
+     */
+    private int defaultRequestTimeout = 600;
+
+    /**
+     * 本地模型默认服务地址
+     */
+    private String localBaseUrl = "http://127.0.0.1:8000/v1";
+
+    /**
+     * 本地模型默认 API Key
+     */
+    private String localApiKey = "EMPTY";
+
+    /**
+     * 本地模型默认名称
+     */
+    private String localModel = "Qwen/Qwen2.5-VL-7B-Instruct";
+
+    /**
+     * 本地模型服务类型
+     */
+    private String localProvider = "openai-compatible";
+
+    /**
+     * 本地模型是否支持视觉输入
+     */
+    private boolean localVisionEnabled = true;
 }

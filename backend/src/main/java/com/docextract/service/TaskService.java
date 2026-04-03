@@ -5,8 +5,11 @@ import com.docextract.dto.TaskDTO;
 import com.docextract.dto.TaskProgressDTO;
 import com.docextract.entity.Task;
 import com.docextract.entity.User;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.docextract.repository.TaskRepository;
 import com.docextract.repository.UserRepository;
+import jakarta.annotation.Resource;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,6 +33,7 @@ import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -43,6 +47,10 @@ public class TaskService {
     private final UserRepository userRepository;
     private final QwenExtractService qwenExtractService;
     private final QwenConfig qwenConfig;
+    private final ObjectMapper objectMapper;
+
+    @Resource(name = "taskExecutor")
+    private Executor taskExecutor;
 
     @Value("${file.upload-dir:./data/uploads}")
     private String uploadDir;
@@ -57,11 +65,15 @@ public class TaskService {
      * 创建批量提取任务
      */
     @Transactional
-    public List<TaskDTO> createTasks(Long userId, String taskName, String extractFieldsJson, String modelMode, MultipartFile[] files) {
+    public List<TaskDTO> createTasks(Long userId, String taskName, String extractFieldsJson,
+                                     String modelMode, String modelParamsJson, MultipartFile[] files) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("用户不存在"));
 
         List<Task> createdTasks = new ArrayList<>();
+        Map<String, Object> extractFieldsPayload = parseJsonPayload(extractFieldsJson, "extractFields");
+        Map<String, Object> modelParams = parseJsonObject(modelParamsJson, "modelParams");
+        Map<String, Object> initialProcessingDetails = buildInitialProcessingDetails(modelMode, modelParams);
 
         // 创建任务目录结构: data/taskName/{pdf, json_data, result}
         Path taskPdfDir = Paths.get(dataDir, sanitizeTaskName(taskName), "pdf");
@@ -102,6 +114,8 @@ public class TaskService {
                         .stage("PENDING")
                         .progress(0)
                         .retryCount(0)
+                        .extractFields(new LinkedHashMap<>(extractFieldsPayload))
+                        .processingDetails(new LinkedHashMap<>(initialProcessingDetails))
                         .startTime(LocalDateTime.now())
                         .build();
 
@@ -126,12 +140,11 @@ public class TaskService {
                 .collect(Collectors.toList());
 
         // 在事务提交后再启动异步处理
-        String finalModelMode = modelMode;
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                log.info("事务已提交，开始异步处理任务: {}, modelMode={}", taskIds, finalModelMode);
-                processTasksBatchAsync(taskIds, extractFieldsJson, finalModelMode);
+                log.info("事务已提交，开始异步处理任务: {}, modelMode={}", taskIds, modelMode);
+                processTasksBatchAsync(taskIds);
             }
         });
 
@@ -144,12 +157,12 @@ public class TaskService {
      * 异步批量处理任务
      */
     @Async("taskExecutor")
-    public void processTasksBatchAsync(List<Long> taskIds, String extractFieldsJson, String modelMode) {
-        log.info("开始批量处理任务: {} 个, modelMode={}", taskIds.size(), modelMode);
+    public void processTasksBatchAsync(List<Long> taskIds) {
+        log.info("开始批量处理任务: {} 个", taskIds.size());
 
         // 使用CompletableFuture进行并行处理
         List<CompletableFuture<Void>> futures = taskIds.stream()
-                .map(taskId -> CompletableFuture.runAsync(() -> processSingleTask(taskId, extractFieldsJson, modelMode)))
+                .map(taskId -> CompletableFuture.runAsync(() -> processSingleTask(taskId), taskExecutor))
                 .toList();
 
         // 等待所有任务完成
@@ -162,9 +175,10 @@ public class TaskService {
      * 处理单个任务
      */
     @Transactional
-    public void processSingleTask(Long taskId, String extractFieldsJson, String modelMode) {
+    public void processSingleTask(Long taskId) {
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> new RuntimeException("任务不存在: " + taskId));
+        String modelMode = getRequestedModelMode(task);
 
         try {
             task.setStatus(Task.TaskStatus.PROCESSING);
@@ -172,8 +186,8 @@ public class TaskService {
             task.setProgress(5);
             taskRepository.save(task);
 
-            // 调用Qwen提取服务，传递 modelMode
-            Map<String, Object> result = qwenExtractService.processTask(task, extractFieldsJson, modelMode);
+            // 调用Qwen提取服务，使用任务中保存的模型配置
+            Map<String, Object> result = qwenExtractService.processTask(task);
 
             // 保存结果
             task.setResult(result);
@@ -183,16 +197,16 @@ public class TaskService {
             task.setEndTime(LocalDateTime.now());
 
             // 添加处理详情
-            Map<String, Object> details = new HashMap<>();
-            details.put("model", result.getOrDefault("model", "unknown"));
-            details.put("modelMode", modelMode);
-            details.put("confidence", result.getOrDefault("confidence", 0.0));
-            details.put("processedAt", LocalDateTime.now().toString());
+            Map<String, Object> details = mergeProcessingDetails(task, result, modelMode);
             task.setProcessingDetails(details);
 
             taskRepository.save(task);
 
-            log.info("任务处理完成: taskId={}, model={}", task.getTaskId(), details.get("model"));
+            Object execution = details.get("execution");
+            Object actualModel = execution instanceof Map<?, ?> executionMap
+                    ? executionMap.get("model")
+                    : result.getOrDefault("model", "unknown");
+            log.info("任务处理完成: taskId={}, model={}", task.getTaskId(), actualModel);
 
         } catch (Exception e) {
             log.error("任务处理失败: taskId={}", task.getTaskId(), e);
@@ -223,6 +237,10 @@ public class TaskService {
             throw new RuntimeException("已达到最大重试次数");
         }
 
+        if (extractFieldsJson != null && !extractFieldsJson.isBlank()) {
+            task.setExtractFields(parseJsonPayload(extractFieldsJson, "extractFields"));
+        }
+
         task.setStatus(Task.TaskStatus.PENDING);
         task.setStage("PENDING");
         task.setProgress(0);
@@ -230,8 +248,13 @@ public class TaskService {
         task.setStartTime(LocalDateTime.now());
         taskRepository.save(task);
 
-        // 异步处理 - 重试时使用普通版模式
-        processSingleTask(taskId, extractFieldsJson, "normal");
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                log.info("失败任务已重新提交: taskId={}", taskId);
+                processTasksBatchAsync(List.of(taskId));
+            }
+        });
 
         return convertToDTO(task);
     }
@@ -365,6 +388,115 @@ public class TaskService {
             case "FAILED" -> "处理失败";
             default -> "处理中";
         };
+    }
+
+    private Map<String, Object> parseJsonObject(String json, String fieldName) {
+        if (json == null || json.isBlank()) {
+            return new LinkedHashMap<>();
+        }
+
+        try {
+            return objectMapper.readValue(json, new TypeReference<LinkedHashMap<String, Object>>() {});
+        } catch (Exception e) {
+            throw new RuntimeException("解析" + fieldName + "失败: " + e.getMessage());
+        }
+    }
+
+    private Map<String, Object> parseJsonPayload(String json, String fieldName) {
+        if (json == null || json.isBlank()) {
+            return wrapJsonPayload(List.of(), "array");
+        }
+
+        try {
+            Object payload = objectMapper.readValue(json, Object.class);
+            String valueType = payload instanceof List ? "array" : "object";
+            return wrapJsonPayload(payload, valueType);
+        } catch (Exception e) {
+            throw new RuntimeException("解析" + fieldName + "失败: " + e.getMessage());
+        }
+    }
+
+    private Map<String, Object> wrapJsonPayload(Object payload, String valueType) {
+        Map<String, Object> wrapper = new LinkedHashMap<>();
+        wrapper.put("valueType", valueType);
+        wrapper.put("payload", payload);
+        return wrapper;
+    }
+
+    private Object unwrapJsonPayload(Map<String, Object> wrappedPayload) {
+        if (wrappedPayload == null || wrappedPayload.isEmpty()) {
+            return List.of();
+        }
+        return wrappedPayload.getOrDefault("payload", wrappedPayload);
+    }
+
+    private String getRequestedModelMode(Task task) {
+        Map<String, Object> processingDetails = task.getProcessingDetails();
+        if (processingDetails == null) {
+            return "normal";
+        }
+
+        Object requestObj = processingDetails.get("request");
+        if (requestObj instanceof Map<?, ?> requestMap) {
+            Object modelMode = requestMap.get("modelMode");
+            if (modelMode != null) {
+                return String.valueOf(modelMode);
+            }
+        }
+        return "normal";
+    }
+
+    private Map<String, Object> getRequestedModelParams(Task task) {
+        Map<String, Object> processingDetails = task.getProcessingDetails();
+        if (processingDetails == null) {
+            return new LinkedHashMap<>();
+        }
+
+        Object requestObj = processingDetails.get("request");
+        if (requestObj instanceof Map<?, ?> requestMap) {
+            Object modelParams = requestMap.get("modelParams");
+            if (modelParams instanceof Map<?, ?> rawMap) {
+                Map<String, Object> params = new LinkedHashMap<>();
+                rawMap.forEach((key, value) -> params.put(String.valueOf(key), value));
+                return params;
+            }
+        }
+        return new LinkedHashMap<>();
+    }
+
+    private Map<String, Object> buildInitialProcessingDetails(String modelMode, Map<String, Object> modelParams) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("modelMode", modelMode);
+        request.put("modelParams", new LinkedHashMap<>(modelParams));
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("request", request);
+        details.put("submittedAt", LocalDateTime.now().toString());
+        return details;
+    }
+
+    private Map<String, Object> mergeProcessingDetails(Task task, Map<String, Object> result, String modelMode) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        if (task.getProcessingDetails() != null) {
+            details.putAll(task.getProcessingDetails());
+        }
+
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("modelMode", modelMode);
+        request.put("modelParams", getRequestedModelParams(task));
+        request.put("extractFields", unwrapJsonPayload(task.getExtractFields()));
+        details.put("request", request);
+
+        Map<String, Object> execution = new LinkedHashMap<>();
+        execution.put("model", result.getOrDefault("model", "unknown"));
+        execution.put("modelMode", modelMode);
+        execution.put("confidence", result.getOrDefault("confidence", 0.0));
+        execution.put("processedAt", LocalDateTime.now().toString());
+        execution.put("generationConfig", result.getOrDefault("generation_config", Map.of()));
+        execution.put("modelRoute", result.getOrDefault("model_route", result.getOrDefault("_model_route", Map.of())));
+        details.put("execution", execution);
+
+        return details;
     }
 
     /**

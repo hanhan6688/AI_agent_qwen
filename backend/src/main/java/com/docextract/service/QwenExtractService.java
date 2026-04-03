@@ -58,16 +58,22 @@ public class QwenExtractService {
     /**
      * 处理提取任务
      */
-    public Map<String, Object> processTask(Task task, String extractFieldsJson, String modelMode) {
+    public Map<String, Object> processTask(Task task) {
         String progressKey = PROGRESS_KEY_PREFIX + task.getTaskId();
+        String modelMode = getRequestedModelMode(task);
+        String extractFieldsJson = buildExtractFieldsJson(task);
+        boolean acquired = false;
+        boolean processRegistered = false;
 
         try {
             // 获取信号量（限制并发）
             if (!processSemaphore.tryAcquire(qwenConfig.getTaskTimeout(), TimeUnit.SECONDS)) {
                 throw new RuntimeException("获取处理槽位超时，请稍后重试");
             }
+            acquired = true;
 
             activeProcesses.incrementAndGet();
+            processRegistered = true;
             log.info("开始处理任务: taskId={}, modelMode={}, 活跃进程数={}", task.getTaskId(), modelMode, activeProcesses.get());
 
             // 更新进度：准备阶段
@@ -107,8 +113,12 @@ public class QwenExtractService {
                     .build());
             throw new RuntimeException("处理失败: " + e.getMessage());
         } finally {
-            activeProcesses.decrementAndGet();
-            processSemaphore.release();
+            if (processRegistered) {
+                activeProcesses.decrementAndGet();
+            }
+            if (acquired) {
+                processSemaphore.release();
+            }
         }
     }
 
@@ -313,6 +323,7 @@ public class QwenExtractService {
         inputData.put("taskName", task.getTaskName());
         inputData.put("userId", task.getUser().getUserId());
         inputData.put("modelMode", modelMode);  // 添加模型模式
+        inputData.put("modelParams", getRequestedModelParams(task));
 
         if (task.getFilePath() != null) {
             String fileName = (String) task.getFilePath().get("fileName");
@@ -336,13 +347,79 @@ public class QwenExtractService {
         }
 
         // 添加Qwen配置
-        inputData.put("qwenConfig", Map.of(
-                "model", qwenConfig.getModel(),
-                "maxImages", qwenConfig.getMaxImages(),
-                "maxContextLength", qwenConfig.getMaxContextLength()
-        ));
+        Map<String, Object> generationDefaults = new LinkedHashMap<>();
+        generationDefaults.put("temperature", qwenConfig.getDefaultTemperature());
+        generationDefaults.put("topP", qwenConfig.getDefaultTopP());
+        generationDefaults.put("topK", qwenConfig.getDefaultTopK());
+        generationDefaults.put("maxTokens", qwenConfig.getDefaultMaxTokens());
+        generationDefaults.put("repetitionPenalty", qwenConfig.getDefaultRepetitionPenalty());
+        generationDefaults.put("timeout", qwenConfig.getDefaultRequestTimeout());
+
+        Map<String, Object> localModelDefaults = new LinkedHashMap<>();
+        localModelDefaults.put("baseUrl", qwenConfig.getLocalBaseUrl());
+        localModelDefaults.put("apiKey", qwenConfig.getLocalApiKey());
+        localModelDefaults.put("model", qwenConfig.getLocalModel());
+        localModelDefaults.put("provider", qwenConfig.getLocalProvider());
+        localModelDefaults.put("visionEnabled", qwenConfig.isLocalVisionEnabled());
+
+        Map<String, Object> qwenSettings = new LinkedHashMap<>();
+        qwenSettings.put("model", qwenConfig.getModel());
+        qwenSettings.put("maxImages", qwenConfig.getMaxImages());
+        qwenSettings.put("maxContextLength", qwenConfig.getMaxContextLength());
+        qwenSettings.put("generationDefaults", generationDefaults);
+        qwenSettings.put("localModelDefaults", localModelDefaults);
+
+        inputData.put("qwenConfig", qwenSettings);
 
         return inputData;
+    }
+
+    private String buildExtractFieldsJson(Task task) {
+        Map<String, Object> extractFields = task.getExtractFields();
+        if (extractFields == null || extractFields.isEmpty()) {
+            return "[]";
+        }
+
+        Object payload = extractFields.getOrDefault("payload", extractFields);
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            throw new RuntimeException("序列化提取字段失败: " + e.getMessage(), e);
+        }
+    }
+
+    private String getRequestedModelMode(Task task) {
+        Map<String, Object> processingDetails = task.getProcessingDetails();
+        if (processingDetails == null) {
+            return "normal";
+        }
+
+        Object requestObj = processingDetails.get("request");
+        if (requestObj instanceof Map<?, ?> requestMap) {
+            Object modelMode = requestMap.get("modelMode");
+            if (modelMode != null) {
+                return String.valueOf(modelMode);
+            }
+        }
+        return "normal";
+    }
+
+    private Map<String, Object> getRequestedModelParams(Task task) {
+        Map<String, Object> processingDetails = task.getProcessingDetails();
+        if (processingDetails == null) {
+            return Map.of();
+        }
+
+        Object requestObj = processingDetails.get("request");
+        if (requestObj instanceof Map<?, ?> requestMap) {
+            Object modelParams = requestMap.get("modelParams");
+            if (modelParams instanceof Map<?, ?> paramsMap) {
+                Map<String, Object> result = new LinkedHashMap<>();
+                paramsMap.forEach((key, value) -> result.put(String.valueOf(key), value));
+                return result;
+            }
+        }
+        return Map.of();
     }
 
     /**
