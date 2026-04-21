@@ -79,6 +79,34 @@ public class FileController {
         }
     }
 
+    @GetMapping("/preview/task/{taskName}/pdf/{fileName}")
+    public ResponseEntity<Resource> previewTaskPdfFile(
+            @PathVariable String taskName,
+            @PathVariable String fileName) {
+        try {
+            String safeTaskName = taskName.replaceAll("[^a-zA-Z0-9\\u4e00-\\u9fa5_-]", "_");
+            Path filePath = Paths.get(dataDir, safeTaskName, "pdf", fileName);
+            if (!Files.exists(filePath)) {
+                return ResponseEntity.notFound().build();
+            }
+
+            Resource resource = new FileSystemResource(filePath);
+            String contentType = Files.probeContentType(filePath);
+            if (contentType == null) {
+                contentType = "application/pdf";
+            }
+
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "inline; filename=\"" + fileName + "\"")
+                    .body(resource);
+        } catch (IOException e) {
+            log.error("任务PDF预览失败: taskName={}, fileName={}", taskName, fileName, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
     @GetMapping("/download/excel/{taskId}")
     public void downloadExcel(
             @PathVariable Long taskId,

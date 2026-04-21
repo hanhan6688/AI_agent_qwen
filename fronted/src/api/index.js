@@ -133,6 +133,10 @@ export const fileApi = {
     return `${api.defaults.baseURL}/api/files/preview/upload/${encodeURIComponent(fileName)}`
   },
 
+  previewTaskPdfFile: (taskName, fileName) => {
+    return `${api.defaults.baseURL}/api/files/preview/task/${encodeURIComponent(taskName)}/pdf/${encodeURIComponent(fileName)}`
+  },
+
   // 下载result目录下的ZIP文件
   downloadResultFile: (taskName, fileName) => {
     return `${api.defaults.baseURL}/api/files/download/result/${encodeURIComponent(taskName)}/result/${encodeURIComponent(fileName)}`

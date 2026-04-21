@@ -133,6 +133,70 @@
           </div>
         </div>
 
+        <div class="form-group">
+          <label>推理参数</label>
+          <div class="inference-config">
+            <div class="config-grid">
+              <div class="config-item">
+                <label for="temperature">Temperature</label>
+                <input
+                  id="temperature"
+                  v-model.number="inferenceConfig.temperature"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.1"
+                  class="form-input"
+                />
+              </div>
+              <div class="config-item">
+                <label for="topP">Top P</label>
+                <input
+                  id="topP"
+                  v-model.number="inferenceConfig.topP"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  class="form-input"
+                />
+              </div>
+              <div class="config-item">
+                <label for="topK">Top K</label>
+                <input
+                  id="topK"
+                  v-model.number="inferenceConfig.topK"
+                  type="number"
+                  min="1"
+                  step="1"
+                  class="form-input"
+                />
+              </div>
+              <div class="config-item">
+                <label for="maxTokens">Max Tokens</label>
+                <input
+                  id="maxTokens"
+                  v-model.number="inferenceConfig.maxTokens"
+                  type="number"
+                  min="128"
+                  step="128"
+                  class="form-input"
+                />
+              </div>
+            </div>
+            <label class="checkbox-row">
+              <input
+                v-model="inferenceConfig.useImages"
+                type="checkbox"
+              />
+              <span>本地模型允许传入图片</span>
+            </label>
+            <p class="config-hint">
+              普通版和专业版会使用 `temperature / top_p / top_k`；本地模型还会使用 `max_tokens` 和 `use_images`。
+            </p>
+          </div>
+        </div>
+
         <button
           @click="submitTask"
           class="submit-button"
@@ -173,6 +237,13 @@ const extractFields = ref([
   { name: '熔点', description: '物质熔化时的温度' },
   { name: '沸点', description: '物质沸腾时的温度' }
 ])
+const inferenceConfig = ref({
+  temperature: 0,
+  topP: 1,
+  topK: 20,
+  maxTokens: 4096,
+  useImages: true
+})
 
 // 拖拽事件处理
 const handleDragOver = () => {
@@ -309,6 +380,13 @@ const submitTask = async () => {
     
     // 添加模型模式
     formData.append('modelMode', modelMode.value)
+    formData.append('inferenceConfig', JSON.stringify({
+      temperature: Number(inferenceConfig.value.temperature),
+      topP: Number(inferenceConfig.value.topP),
+      topK: Number(inferenceConfig.value.topK),
+      maxTokens: Number(inferenceConfig.value.maxTokens),
+      useImages: Boolean(inferenceConfig.value.useImages)
+    }))
 
     // 添加所有文件
     selectedFiles.value.forEach((file, index) => {
@@ -554,6 +632,47 @@ const showMessage = (text, type = 'success') => {
   flex-direction: column;
   gap: 0.8rem;
   margin-bottom: 1.5rem;
+}
+
+.inference-config {
+  padding: 1rem;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.config-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+
+  label {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #4a5568;
+    font-weight: 500;
+  }
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+  color: #2d3748;
+  font-size: 0.9rem;
+}
+
+.config-hint {
+  margin: 0.7rem 0 0 0;
+  font-size: 0.8rem;
+  color: #718096;
 }
 
 /* 模型模式选择器 */

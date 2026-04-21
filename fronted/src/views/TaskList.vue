@@ -134,7 +134,7 @@
                 <p v-if="file.errorMessage" class="pdf-error">{{ file.errorMessage }}</p>
               </div>
               <div class="pdf-actions">
-                <button @click="previewPdf(file)" class="pdf-action-btn" title="预览">
+                <button @click="previewPdf(selectedBatch, file)" class="pdf-action-btn" title="预览">
                   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
                     <circle cx="12" cy="12" r="3"></circle>
@@ -234,9 +234,9 @@ const closeModal = () => {
   selectedBatch.value = null
 }
 
-const previewPdf = (file) => {
-  if (file.filePath) {
-    window.open(fileApi.previewUploadedFile(file.filePath), '_blank')
+const previewPdf = (batch, file) => {
+  if (batch?.taskName && file?.filePath) {
+    window.open(fileApi.previewTaskPdfFile(batch.taskName, file.filePath), '_blank')
   }
 }
 

@@ -24,10 +24,10 @@ logger = logging.getLogger('IntegratedProcessor')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_process import upload_batch, wait_until_done, fetch_and_download, BATCH_SIZE
-from qwen_process_url_new import extract_once, preprocess_context, MODEL_PRO
+from qwen_process_url_new import extract_once, preprocess_context, MODEL_PRO, normalize_inference_config
 
-def load_config():
-    """加载环境变量"""
+def load_config(model_mode: str = "normal"):
+    """加载环境变量。local 模式不强制要求 DashScope。"""
     from dotenv import load_dotenv
     load_dotenv()
     
@@ -40,7 +40,7 @@ def load_config():
     
     if not config['MINERU_API_KEY']:
         raise RuntimeError('MINERU_API_KEY环境变量未设置')
-    if not config['DASHSCOPE_API_KEY']:
+    if model_mode != "local" and not config['DASHSCOPE_API_KEY']:
         raise RuntimeError('DASHSCOPE_API_KEY环境变量未设置')
     
     return config
@@ -82,11 +82,16 @@ def build_prompt_from_fields(extract_fields) -> str:
     
     return prompt
 
+def sanitize_inference_config(inference_config: Optional[Dict]) -> Dict:
+    """规范化推理参数。"""
+    return normalize_inference_config(inference_config)
+
 def process_single_pdf(file_path: str, config: Dict, temp_work_dir: Path, 
                         task_data_dir: Optional[Path] = None, 
                         original_filename: Optional[str] = None,
                         extract_fields: Optional[Dict] = None,
-                        model_mode: str = "normal") -> Tuple[str, Dict]:
+                        model_mode: str = "normal",
+                        inference_config: Optional[Dict] = None) -> Tuple[str, Dict]:
     """
     处理单个文件（PDF/JPG/PNG）的完整流程
     
@@ -223,8 +228,15 @@ def process_single_pdf(file_path: str, config: Dict, temp_work_dir: Path,
         else:
             mode_text = "普通版 (智能路由)"
         logger.info(f"模型模式: {mode_text}")
-        
-        status, result = extract_once(str(md_file), prompt=prompt, model_mode=model_mode)
+        inference_config = sanitize_inference_config(inference_config)
+        logger.info(f"推理参数: {inference_config}")
+
+        status, result = extract_once(
+            str(md_file),
+            prompt=prompt,
+            model_mode=model_mode,
+            inference_config=inference_config
+        )
         
         if status == "success":
             # 保存JSON到任务目录
@@ -289,6 +301,7 @@ def main():
         original_filename = file_info.get('fileName')
         task_data_dir_str = file_info.get('taskDataDir')
         model_mode = input_data.get('modelMode', 'normal')  # 获取模型模式，默认普通版
+        inference_config = input_data.get('inferenceConfig', {})
         
         if not file_path:
             raise ValueError("filePath不能为空")
@@ -318,11 +331,16 @@ def main():
             except json.JSONDecodeError as e:
                 logger.warning(f"解析提取字段JSON失败: {e}")
         
-        mode_text = "专业版" if model_mode == "pro" else "普通版"
+        if model_mode == "local":
+            mode_text = "本地模型"
+        elif model_mode == "pro":
+            mode_text = "专业版"
+        else:
+            mode_text = "普通版"
         logger.info(f"开始处理任务: taskId={task_id}, taskName={task_name}, file={file_path}, 模式={mode_text}")
         
         # 加载配置
-        config = load_config()
+        config = load_config(model_mode=model_mode)
         
         # 创建临时工作目录
         temp_work_dir = Path(f"./temp_task_{task_id}")
@@ -335,7 +353,8 @@ def main():
                 task_data_dir=task_data_dir,
                 original_filename=original_filename,
                 extract_fields=extract_fields,
-                model_mode=model_mode
+                model_mode=model_mode,
+                inference_config=inference_config
             )
             
             # 从结果中获取实际使用的模型
@@ -350,6 +369,7 @@ def main():
                     "confidence": 0.95,
                     "model": actual_model,
                     "model_mode": model_mode,
+                    "inference_config": sanitize_inference_config(inference_config),
                     "mineru_processed": True,
                     "task_data_dir": str(task_data_dir) if task_data_dir else None
                 }
@@ -361,6 +381,7 @@ def main():
                     "confidence": 0.7,
                     "model": actual_model,
                     "model_mode": model_mode,
+                    "inference_config": sanitize_inference_config(inference_config),
                     "task_data_dir": str(task_data_dir) if task_data_dir else None
                 }
             else:

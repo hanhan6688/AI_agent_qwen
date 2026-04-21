@@ -30,6 +30,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+python-worker/.model_route_cache.json
 
 # Data
 data/uploads/*

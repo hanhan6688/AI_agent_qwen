@@ -57,7 +57,7 @@ public class TaskService {
      * 创建批量提取任务
      */
     @Transactional
-    public List<TaskDTO> createTasks(Long userId, String taskName, String extractFieldsJson, String modelMode, MultipartFile[] files) {
+    public List<TaskDTO> createTasks(Long userId, String taskName, String extractFieldsJson, String modelMode, String inferenceConfigJson, MultipartFile[] files) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("用户不存在"));
 
@@ -127,11 +127,12 @@ public class TaskService {
 
         // 在事务提交后再启动异步处理
         String finalModelMode = modelMode;
+        String finalInferenceConfigJson = inferenceConfigJson;
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
                 log.info("事务已提交，开始异步处理任务: {}, modelMode={}", taskIds, finalModelMode);
-                processTasksBatchAsync(taskIds, extractFieldsJson, finalModelMode);
+                processTasksBatchAsync(taskIds, extractFieldsJson, finalModelMode, finalInferenceConfigJson);
             }
         });
 
@@ -144,12 +145,12 @@ public class TaskService {
      * 异步批量处理任务
      */
     @Async("taskExecutor")
-    public void processTasksBatchAsync(List<Long> taskIds, String extractFieldsJson, String modelMode) {
+    public void processTasksBatchAsync(List<Long> taskIds, String extractFieldsJson, String modelMode, String inferenceConfigJson) {
         log.info("开始批量处理任务: {} 个, modelMode={}", taskIds.size(), modelMode);
 
         // 使用CompletableFuture进行并行处理
         List<CompletableFuture<Void>> futures = taskIds.stream()
-                .map(taskId -> CompletableFuture.runAsync(() -> processSingleTask(taskId, extractFieldsJson, modelMode)))
+                .map(taskId -> CompletableFuture.runAsync(() -> processSingleTask(taskId, extractFieldsJson, modelMode, inferenceConfigJson)))
                 .toList();
 
         // 等待所有任务完成
@@ -162,7 +163,7 @@ public class TaskService {
      * 处理单个任务
      */
     @Transactional
-    public void processSingleTask(Long taskId, String extractFieldsJson, String modelMode) {
+    public void processSingleTask(Long taskId, String extractFieldsJson, String modelMode, String inferenceConfigJson) {
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> new RuntimeException("任务不存在: " + taskId));
 
@@ -173,7 +174,7 @@ public class TaskService {
             taskRepository.save(task);
 
             // 调用Qwen提取服务，传递 modelMode
-            Map<String, Object> result = qwenExtractService.processTask(task, extractFieldsJson, modelMode);
+            Map<String, Object> result = qwenExtractService.processTask(task, extractFieldsJson, modelMode, inferenceConfigJson);
 
             // 保存结果
             task.setResult(result);
@@ -187,6 +188,7 @@ public class TaskService {
             details.put("model", result.getOrDefault("model", "unknown"));
             details.put("modelMode", modelMode);
             details.put("confidence", result.getOrDefault("confidence", 0.0));
+            details.put("inferenceConfig", result.getOrDefault("inference_config", null));
             details.put("processedAt", LocalDateTime.now().toString());
             task.setProcessingDetails(details);
 
@@ -231,7 +233,7 @@ public class TaskService {
         taskRepository.save(task);
 
         // 异步处理 - 重试时使用普通版模式
-        processSingleTask(taskId, extractFieldsJson, "normal");
+        processSingleTask(taskId, extractFieldsJson, "normal", null);
 
         return convertToDTO(task);
     }
@@ -304,13 +306,7 @@ public class TaskService {
 
         // 删除关联文件
         try {
-            if (task.getFilePath() != null) {
-                String filePath = task.getFilePath().get("filePath");
-                if (filePath != null) {
-                    Path path = Paths.get(uploadDir, filePath);
-                    Files.deleteIfExists(path);
-                }
-            }
+            deleteTaskFile(task);
         } catch (IOException e) {
             log.error("删除文件失败: {}", e.getMessage());
         }
@@ -542,17 +538,55 @@ public class TaskService {
         for (Task task : tasks) {
             // 删除关联文件
             try {
-                if (task.getFilePath() != null) {
-                    String filePath = task.getFilePath().get("filePath");
-                    if (filePath != null) {
-                        Path path = Paths.get(uploadDir, filePath);
-                        Files.deleteIfExists(path);
-                    }
-                }
+                deleteTaskFile(task);
             } catch (IOException e) {
                 log.error("删除文件失败: {}", e.getMessage());
             }
             taskRepository.delete(task);
+        }
+
+        cleanupTaskDirectory(taskName);
+    }
+
+    private void deleteTaskFile(Task task) throws IOException {
+        if (task.getFilePath() == null) {
+            return;
+        }
+
+        String filePath = task.getFilePath().get("filePath");
+        String taskDataDir = task.getFilePath().get("taskDataDir");
+        if (filePath == null || filePath.isBlank()) {
+            return;
+        }
+
+        Path resolvedPath;
+        if (taskDataDir != null && !taskDataDir.isBlank()) {
+            resolvedPath = Paths.get(taskDataDir, "pdf", filePath);
+        } else {
+            resolvedPath = Paths.get(uploadDir, filePath);
+        }
+
+        Files.deleteIfExists(resolvedPath);
+    }
+
+    private void cleanupTaskDirectory(String taskName) {
+        Path taskDir = Paths.get(dataDir, sanitizeTaskName(taskName));
+        if (!Files.exists(taskDir)) {
+            return;
+        }
+
+        try {
+            Files.walk(taskDir)
+                    .sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException e) {
+                            log.warn("清理任务目录失败: {}", path, e);
+                        }
+                    });
+        } catch (IOException e) {
+            log.warn("遍历任务目录失败: {}", taskDir, e);
         }
     }
 }

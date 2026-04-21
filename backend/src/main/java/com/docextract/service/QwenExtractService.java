@@ -58,7 +58,7 @@ public class QwenExtractService {
     /**
      * 处理提取任务
      */
-    public Map<String, Object> processTask(Task task, String extractFieldsJson, String modelMode) {
+    public Map<String, Object> processTask(Task task, String extractFieldsJson, String modelMode, String inferenceConfigJson) {
         String progressKey = PROGRESS_KEY_PREFIX + task.getTaskId();
 
         try {
@@ -74,7 +74,7 @@ public class QwenExtractService {
             updateProgress(progressKey, TaskProgressDTO.of(task.getTaskId(), "UPLOADING", 10));
 
             // 准备输入数据（包含 modelMode）
-            Map<String, Object> inputData = prepareInputData(task, modelMode);
+            Map<String, Object> inputData = prepareInputData(task, modelMode, inferenceConfigJson);
             Path inputFilePath = writeInputFile(task, inputData);
 
             // 更新进度：OCR阶段
@@ -307,12 +307,13 @@ public class QwenExtractService {
     /**
      * 准备输入数据
      */
-    private Map<String, Object> prepareInputData(Task task, String modelMode) {
+    private Map<String, Object> prepareInputData(Task task, String modelMode, String inferenceConfigJson) {
         Map<String, Object> inputData = new HashMap<>();
         inputData.put("taskId", task.getTaskId());
         inputData.put("taskName", task.getTaskName());
         inputData.put("userId", task.getUser().getUserId());
         inputData.put("modelMode", modelMode);  // 添加模型模式
+        inputData.put("inferenceConfig", parseInferenceConfig(inferenceConfigJson));
 
         if (task.getFilePath() != null) {
             String fileName = (String) task.getFilePath().get("fileName");
@@ -343,6 +344,18 @@ public class QwenExtractService {
         ));
 
         return inputData;
+    }
+
+    private Map<String, Object> parseInferenceConfig(String inferenceConfigJson) {
+        if (inferenceConfigJson == null || inferenceConfigJson.isBlank()) {
+            return Collections.emptyMap();
+        }
+        try {
+            return objectMapper.readValue(inferenceConfigJson, Map.class);
+        } catch (Exception e) {
+            log.warn("解析 inferenceConfig 失败，将使用默认参数: {}", inferenceConfigJson, e);
+            return Collections.emptyMap();
+        }
     }
 
     /**

@@ -69,7 +69,7 @@ python integrated_processor.py <input_json_file> <extract_fields_json>
 **功能：**
 - 读取MinerU生成的Markdown文件
 - 提取相关图片（Fig/图表）
-- 调用Qwen3-VL API进行多模态分析
+- 调用Qwen3-VL 或 OpenAI 兼容本地模型进行分析
 - 提取结构化数据
 
 **主要函数：**
@@ -89,6 +89,16 @@ MINERU_API_KEY=your_mineru_api_key
 
 # OpenAI API Key (备用)
 OPENAI_API_KEY=your_openai_api_key
+
+# 本地模型 (OpenAI 兼容 API)
+LOCAL_MODEL_ENABLED=false
+LOCAL_MODEL_BASE_URL=http://localhost:8000/v1
+LOCAL_MODEL_API_KEY=not-needed
+LOCAL_MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
+LOCAL_MODEL_PRESET=
+LOCAL_MODEL_TIMEOUT=300
+LOCAL_MODEL_MAX_TOKENS=4096
+LOCAL_MODEL_USE_IMAGES=true
 ```
 
 ### 2. Java后端配置 (application.yml)
@@ -149,6 +159,22 @@ typing
 编辑 `.env` 文件，填入有效的API密钥：
 - `MINERU_API_KEY`: 从MinerU官网申请
 - `DASHSCOPE_API_KEY`: 从阿里云DashScope申请
+
+如果要改为本地模型模式，请额外配置：
+- `LOCAL_MODEL_ENABLED=true`
+- `LOCAL_MODEL_BASE_URL`: OpenAI 兼容接口地址，例如 `http://localhost:8000/v1`、`http://localhost:11434/v1`、`http://localhost:1234/v1`
+- `LOCAL_MODEL_NAME`: 本地服务中实际可用的模型名
+- `LOCAL_MODEL_USE_IMAGES=false`: 当模型只支持文本、不支持视觉输入时可关闭图片传入
+
+常见 OpenAI 兼容服务示例：
+- vLLM: `LOCAL_MODEL_BASE_URL=http://localhost:8000/v1`
+- Ollama: `LOCAL_MODEL_BASE_URL=http://localhost:11434/v1`
+- LM Studio: `LOCAL_MODEL_BASE_URL=http://localhost:1234/v1`
+
+说明：
+- 当任务使用 `modelMode=local` 时，Worker 不再强制要求 `DASHSCOPE_API_KEY`
+- 如果服务不支持 `response_format`，Worker 会自动降级为“纯文本 JSON 输出”
+- 如果模型不支持图片输入，Worker 会自动降级为仅文本提取
 
 ### 3. 启动后端服务
 
