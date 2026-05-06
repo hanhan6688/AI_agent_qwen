@@ -15,6 +15,12 @@ ENV/
 *.war
 target/
 
+# Frontend dependencies/build output
+node_modules/
+fronted/node_modules/
+fronted/dist/
+dist/
+
 # IDE
 .idea/
 .vscode/
@@ -30,7 +36,13 @@ Thumbs.db
 # Logs
 *.log
 logs/
+run-logs/
 python-worker/.model_route_cache.json
+python-worker/temp_task_*/
+python-worker/input_*.json
+python-worker/agent_chat_*.json
+python-worker/agent_langchain_*.json
+python-worker/agent_chat_upload_*/
 
 # Data
 data/uploads/*
@@ -40,6 +52,27 @@ data/processed/*
 data/excel/*
 !data/excel/.gitkeep
 backend/data/
+data/
+reports/
+
+# Local thesis / generated documents
+论文/
+*.docx
+*.pdf
+*.zip
+build_thesis_doc.ps1
+create_doc*.py
+create_abstract.py
+optimize_thesis.py
+update_doc.py
+api_smoke_test.ps1
+compare_mode_latency.py
+run_pdfbenchmark_comparison.py
+test_both_modes.py
+test_extraction.ps1
+scripts/
+.claude/
+CLAUDE.md
 
 # Environment
 .env

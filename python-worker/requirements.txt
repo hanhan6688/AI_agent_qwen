@@ -1,26 +1,28 @@
-# Python Worker 依赖包
+# Python Worker dependencies
 
-# HTTP请求库
+# HTTP clients
 requests>=2.31.0
+httpx>=0.25.0
 
-# 环境变量管理
+# Retry and environment management
+tenacity>=8.2.0
 python-dotenv>=1.0.0
 
-# 阿里云服务SDK（Qwen3-VL）
+# Qwen / DashScope SDK
 dashscope>=1.14.0
 
-# OpenAI SDK（用于本地模型调用）
-openai>=1.0.0
+# LangChain agent chat and PDF context loading
+langchain>=0.2.0
+langchain-community>=0.2.0
+pypdf>=4.0.0
 
-# 类型提示
+# Type hints
 typing-extensions>=4.8.0
 
-# 数据处理和Excel生成
+# Data processing and Excel export
 pandas>=2.0.0
 openpyxl>=3.1.0
 
-# 日志增强（可选）
+# Optional diagnostics
 # coloredlogs>=15.0
-
-# 性能监控（可选）
 # psutil>=5.9.0

@@ -1,5 +1,10 @@
 server:
   port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
 
 spring:
   application:
@@ -7,7 +12,7 @@ spring:
 
   # 数据库配置
   datasource:
-    url: jdbc:postgresql://localhost:5433/docextract
+    url: jdbc:postgresql://localhost:5433/docextract?charSet=UTF-8
     username: admin
     password: password123
     driver-class-name: org.postgresql.Driver
@@ -22,7 +27,7 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
-    show-sql: true
+    show-sql: false
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
@@ -51,6 +56,7 @@ spring:
       enabled: true
       max-file-size: 100MB
       max-request-size: 1000MB
+      resolve-lazily: true  # 延迟解析，确保 CharacterEncodingFilter 先生效
 
 # 文件存储配置
 file:
@@ -69,20 +75,20 @@ python:
 qwen:
   api-key: ${DASHSCOPE_API_KEY:}
   model: qwen-vl-max-latest
-  max-concurrent: 3       # 最大并发处理数
-  task-timeout: 600       # 单任务超时（秒）
-  max-retries: 3          # 最大重试次数
-  retry-interval: 5       # 重试间隔（秒）
-  max-tpm: 1000000        # TPM限制
-  max-images: 15          # 单次最大图片数
+  max-concurrent: 8        # 最大并发处理数（支持一次上传8个PDF至少同时处理3个）
+  task-timeout: 600        # 单任务超时（秒）
+  max-retries: 3           # 最大重试次数
+  retry-interval: 5        # 重试间隔（秒）
+  max-tpm: 1000000         # TPM限制
+  max-images: 15           # 单次最大图片数
   max-context-length: 150000  # 最大上下文长度
 
-# 日志配置
+# 日志配置（简化SQL输出）
 logging:
   level:
-    com.docextract: DEBUG
-    org.springframework.web: INFO
-    org.hibernate.SQL: DEBUG
-    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    com.docextract: INFO
+    org.springframework.web: WARN
+    org.hibernate.SQL: OFF
+    org.hibernate.type.descriptor.sql.BasicBinder: OFF
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"

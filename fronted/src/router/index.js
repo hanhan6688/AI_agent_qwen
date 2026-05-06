@@ -1,25 +1,30 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import Login from '../views/Login.vue'
-import Dashboard from '../views/Dashboard.vue'
-import TaskList from '../views/TaskList.vue'
+
+const LoginRoutePlaceholder = { template: '<div />' }
 
 const routes = [
   {
     path: '/login',
     name: 'Login',
-    component: Login,
+    component: LoginRoutePlaceholder,
     meta: { requiresAuth: false }
   },
   {
     path: '/',
     name: 'Dashboard',
-    component: Dashboard,
+    component: () => import('../views/Dashboard.vue'),
     meta: { requiresAuth: true }
   },
   {
     path: '/tasks',
     name: 'TaskList',
-    component: TaskList,
+    component: () => import('../views/TaskList.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/agent',
+    name: 'AgentChat',
+    component: () => import('../views/AgentChat.vue'),
     meta: { requiresAuth: true }
   }
 ]

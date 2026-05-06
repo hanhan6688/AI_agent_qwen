@@ -7,14 +7,18 @@ import com.docextract.entity.Task;
 import com.docextract.entity.User;
 import com.docextract.repository.TaskRepository;
 import com.docextract.repository.UserRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.Resource;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
-import org.springframework.scheduling.annotation.Async;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -27,9 +31,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -39,10 +45,16 @@ import java.util.zip.ZipOutputStream;
 @Slf4j
 public class TaskService {
 
+    private static final ObjectMapper TASK_OBJECT_MAPPER = new ObjectMapper();
+
     private final TaskRepository taskRepository;
     private final UserRepository userRepository;
     private final QwenExtractService qwenExtractService;
     private final QwenConfig qwenConfig;
+    private final RedisTemplate<String, Object> redisTemplate;
+
+    @Resource(name = "taskExecutor")
+    private Executor batchTaskExecutor;
 
     @Value("${file.upload-dir:./data/uploads}")
     private String uploadDir;
@@ -57,6 +69,7 @@ public class TaskService {
      * 创建批量提取任务
      */
     @Transactional
+    @CacheEvict(value = "result", key = "'batchTasks:' + #userId")
     public List<TaskDTO> createTasks(Long userId, String taskName, String extractFieldsJson, String modelMode, String inferenceConfigJson, MultipartFile[] files) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("用户不存在"));
@@ -93,6 +106,7 @@ public class TaskService {
                         .user(user)
                         .taskName(taskName)
                         .documentCount(1)
+                        .extractFields(buildExtractFieldsPayload(extractFieldsJson))
                         .filePath(Map.of(
                             "fileName", originalFilename, 
                             "filePath", uniqueFileName,
@@ -132,7 +146,10 @@ public class TaskService {
             @Override
             public void afterCommit() {
                 log.info("事务已提交，开始异步处理任务: {}, modelMode={}", taskIds, finalModelMode);
-                processTasksBatchAsync(taskIds, extractFieldsJson, finalModelMode, finalInferenceConfigJson);
+                CompletableFuture.runAsync(
+                        () -> processTasksBatchAsync(taskIds, extractFieldsJson, finalModelMode, finalInferenceConfigJson),
+                        batchTaskExecutor
+                );
             }
         });
 
@@ -144,19 +161,24 @@ public class TaskService {
     /**
      * 异步批量处理任务
      */
-    @Async("taskExecutor")
     public void processTasksBatchAsync(List<Long> taskIds, String extractFieldsJson, String modelMode, String inferenceConfigJson) {
         log.info("开始批量处理任务: {} 个, modelMode={}", taskIds.size(), modelMode);
 
         // 使用CompletableFuture进行并行处理
         List<CompletableFuture<Void>> futures = taskIds.stream()
-                .map(taskId -> CompletableFuture.runAsync(() -> processSingleTask(taskId, extractFieldsJson, modelMode, inferenceConfigJson)))
+                .map(taskId -> CompletableFuture.runAsync(
+                        () -> processSingleTask(taskId, extractFieldsJson, modelMode, inferenceConfigJson),
+                        batchTaskExecutor))
                 .toList();
 
-        // 等待所有任务完成
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-
-        log.info("批量处理完成");
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        log.warn("批量处理存在失败任务: {}", error.getMessage());
+                    } else {
+                        log.info("批量处理完成");
+                    }
+                });
     }
 
     /**
@@ -171,6 +193,16 @@ public class TaskService {
             task.setStatus(Task.TaskStatus.PROCESSING);
             task.setStage("UPLOADING");
             task.setProgress(5);
+            Map<String, Object> details = task.getProcessingDetails() != null
+                    ? new HashMap<>(task.getProcessingDetails())
+                    : new HashMap<>();
+            details.put("requestedModelMode", modelMode);
+            if (inferenceConfigJson != null && !inferenceConfigJson.isBlank()) {
+                details.put("requestedInferenceConfigJson", inferenceConfigJson);
+            } else {
+                details.remove("requestedInferenceConfigJson");
+            }
+            task.setProcessingDetails(details);
             taskRepository.save(task);
 
             // 调用Qwen提取服务，传递 modelMode
@@ -184,9 +216,11 @@ public class TaskService {
             task.setEndTime(LocalDateTime.now());
 
             // 添加处理详情
-            Map<String, Object> details = new HashMap<>();
             details.put("model", result.getOrDefault("model", "unknown"));
             details.put("modelMode", modelMode);
+            details.put("cacheHit", result.getOrDefault("cache_hit", false));
+            details.put("promptMode", result.getOrDefault("prompt_mode", "fields"));
+            details.put("customPromptEnabled", result.getOrDefault("custom_prompt_enabled", false));
             details.put("confidence", result.getOrDefault("confidence", 0.0));
             details.put("inferenceConfig", result.getOrDefault("inference_config", null));
             details.put("processedAt", LocalDateTime.now().toString());
@@ -197,15 +231,29 @@ public class TaskService {
             log.info("任务处理完成: taskId={}, model={}", task.getTaskId(), details.get("model"));
 
         } catch (Exception e) {
-            log.error("任务处理失败: taskId={}", task.getTaskId(), e);
+            log.error("任务处理失败: taskId={}, error={}", task.getTaskId(), e.getMessage(), e);
 
             task.setStatus(Task.TaskStatus.FAILED);
             task.setStage("FAILED");
+            task.setProgress(0);
             task.setEndTime(LocalDateTime.now());
             task.setErrorMessage(e.getMessage());
             task.setRetryCount(task.getRetryCount() + 1);
-
             taskRepository.save(task);
+
+            // 立即更新 Redis 进度，确保前端能看到失败状态
+            String progressKey = "task:progress:" + taskId;
+            try {
+                TaskProgressDTO failedProgress = TaskProgressDTO.builder()
+                        .taskId(taskId)
+                        .stage("FAILED")
+                        .stageText("处理失败: " + e.getMessage())
+                        .errorMessage(e.getMessage())
+                        .build();
+                redisTemplate.opsForValue().set(progressKey, failedProgress, Duration.ofHours(24));
+            } catch (Exception redisEx) {
+                log.warn("更新Redis进度失败: {}", redisEx.getMessage());
+            }
         }
     }
 
@@ -225,6 +273,20 @@ public class TaskService {
             throw new RuntimeException("已达到最大重试次数");
         }
 
+        // 如果没有提供 extractFieldsJson，使用任务中已保存的
+        String extractFieldsToUse = extractFieldsJson;
+        if (extractFieldsToUse == null || extractFieldsToUse.isBlank()) {
+            Map<String, Object> existingFields = task.getExtractFields();
+            if (existingFields != null) {
+                try {
+                    extractFieldsToUse = TASK_OBJECT_MAPPER.writeValueAsString(existingFields);
+                } catch (Exception e) {
+                    throw new RuntimeException("序列化提取字段配置失败");
+                }
+            }
+        }
+        final String finalExtractFieldsJson = extractFieldsToUse;
+
         task.setStatus(Task.TaskStatus.PENDING);
         task.setStage("PENDING");
         task.setProgress(0);
@@ -233,9 +295,61 @@ public class TaskService {
         taskRepository.save(task);
 
         // 异步处理 - 重试时使用普通版模式
-        processSingleTask(taskId, extractFieldsJson, "normal", null);
+        String retryModelMode = resolveRetryModelMode(task);
+        String retryInferenceConfigJson = resolveRetryInferenceConfigJson(task);
+        Runnable retryAction = () -> processSingleTask(taskId, finalExtractFieldsJson, retryModelMode, retryInferenceConfigJson);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    CompletableFuture.runAsync(retryAction, batchTaskExecutor);
+                }
+            });
+        } else {
+            CompletableFuture.runAsync(retryAction, batchTaskExecutor);
+        }
 
         return convertToDTO(task);
+    }
+
+    private String resolveRetryModelMode(Task task) {
+        Map<String, Object> details = task.getProcessingDetails();
+        if (details == null || details.isEmpty()) {
+            return "normal";
+        }
+
+        Object requested = details.get("requestedModelMode");
+        if (requested instanceof String requestedMode && !requestedMode.isBlank()) {
+            return normalizeModelMode(requestedMode);
+        }
+
+        Object lastUsed = details.get("modelMode");
+        if (lastUsed instanceof String lastMode && !lastMode.isBlank()) {
+            return normalizeModelMode(lastMode);
+        }
+
+        return "normal";
+    }
+
+    private String normalizeModelMode(String modelMode) {
+        if ("pro".equalsIgnoreCase(modelMode)) {
+            return "pro";
+        }
+        return "normal";
+    }
+
+    private String resolveRetryInferenceConfigJson(Task task) {
+        Map<String, Object> details = task.getProcessingDetails();
+        if (details == null || details.isEmpty()) {
+            return null;
+        }
+
+        Object requested = details.get("requestedInferenceConfigJson");
+        if (requested instanceof String requestedConfig && !requestedConfig.isBlank()) {
+            return requestedConfig;
+        }
+
+        return null;
     }
 
     /**
@@ -448,7 +562,9 @@ public class TaskService {
 
     /**
      * 获取用户所有批量任务（按taskName分组）
+     * 缓存 key = "batchTasks:" + userId，TTL = 5分钟
      */
+    @Cacheable(value = "result", key = "'batchTasks:' + #userId")
     public List<Map<String, Object>> getBatchTasks(Long userId) {
         // 获取所有任务
         List<Task> allTasks = taskRepository.findByUserUserIdOrderByCreatedAtDesc(userId);
@@ -533,6 +649,7 @@ public class TaskService {
      * 删除批量任务（删除该taskName下的所有任务）
      */
     @Transactional
+    @CacheEvict(value = "result", key = "'batchTasks:' + #userId")
     public void deleteBatchTask(Long userId, String taskName) {
         List<Task> tasks = taskRepository.findByUserIdAndTaskName(userId, taskName);
         for (Task task : tasks) {
@@ -567,6 +684,35 @@ public class TaskService {
         }
 
         Files.deleteIfExists(resolvedPath);
+    }
+
+    private Map<String, Object> buildExtractFieldsPayload(String extractFieldsJson) {
+        if (extractFieldsJson == null || extractFieldsJson.isBlank()) {
+            return Collections.emptyMap();
+        }
+
+        try {
+            Object parsed = TASK_OBJECT_MAPPER.readValue(extractFieldsJson, Object.class);
+            Map<String, Object> payload = new LinkedHashMap<>();
+
+            if (parsed instanceof Map<?, ?> mapValue) {
+                for (Map.Entry<?, ?> entry : mapValue.entrySet()) {
+                    payload.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+                return payload;
+            }
+
+            if (parsed instanceof List<?> listValue) {
+                payload.put("fields", listValue);
+                return payload;
+            }
+
+            payload.put("value", parsed);
+            return payload;
+        } catch (Exception e) {
+            log.warn("解析 extractFields 失败，将保存原始请求体");
+            return Map.of("raw", extractFieldsJson);
+        }
     }
 
     private void cleanupTaskDirectory(String taskName) {

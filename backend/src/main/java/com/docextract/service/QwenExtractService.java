@@ -12,7 +12,10 @@ import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -20,6 +23,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import jakarta.annotation.PostConstruct;
 
 /**
  * Qwen智能提取服务 - 优化版
@@ -50,16 +54,52 @@ public class QwenExtractService {
     private final AtomicInteger activeProcesses = new AtomicInteger(0);
 
     // 进程信号量，控制并发数
-    private final Semaphore processSemaphore = new Semaphore(3, true);
+    // 支持一次处理8个PDF，至少同时处理3个
+    private Semaphore processSemaphore;
 
     // 任务进度缓存前缀
     private static final String PROGRESS_KEY_PREFIX = "task:progress:";
+
+    /**
+     * 启动时清理残留的输入文件
+     */
+    @PostConstruct
+    public void cleanupStaleInputFiles() {
+        processSemaphore = new Semaphore(Math.max(1, qwenConfig.getMaxConcurrent()), true);
+        log.info("Python处理并发槽初始化: {}", qwenConfig.getMaxConcurrent());
+
+        try {
+            Path workerDir = Paths.get(pythonWorkerDir);
+            if (!Files.exists(workerDir)) return;
+
+            File[] staleFiles = workerDir.toFile().listFiles((dir, name) ->
+                    name.startsWith("input_") && name.endsWith(".json"));
+            if (staleFiles != null) {
+                for (File stale : staleFiles) {
+                    // 只清理创建超过1小时的残留文件
+                    if (System.currentTimeMillis() - stale.lastModified() > 3600000L) {
+                        try {
+                            Files.deleteIfExists(stale.toPath());
+                            log.info("已清理残留输入文件: {}", stale.getName());
+                        } catch (IOException e) {
+                            log.warn("清理残留文件失败: {}", stale.getName());
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("清理残留输入文件时出错: {}", e.getMessage());
+        }
+    }
 
     /**
      * 处理提取任务
      */
     public Map<String, Object> processTask(Task task, String extractFieldsJson, String modelMode, String inferenceConfigJson) {
         String progressKey = PROGRESS_KEY_PREFIX + task.getTaskId();
+        boolean semaphoreAcquired = false;
+        boolean processRegistered = false;
+        Path inputFilePath = null;
 
         try {
             // 获取信号量（限制并发）
@@ -67,27 +107,26 @@ public class QwenExtractService {
                 throw new RuntimeException("获取处理槽位超时，请稍后重试");
             }
 
+            semaphoreAcquired = true;
             activeProcesses.incrementAndGet();
+            processRegistered = true;
             log.info("开始处理任务: taskId={}, modelMode={}, 活跃进程数={}", task.getTaskId(), modelMode, activeProcesses.get());
 
             // 更新进度：准备阶段
             updateProgress(progressKey, TaskProgressDTO.of(task.getTaskId(), "UPLOADING", 10));
 
             // 准备输入数据（包含 modelMode）
-            Map<String, Object> inputData = prepareInputData(task, modelMode, inferenceConfigJson);
-            Path inputFilePath = writeInputFile(task, inputData);
+            Map<String, Object> inputData = prepareInputData(task, extractFieldsJson, modelMode, inferenceConfigJson);
+            inputFilePath = writeInputFile(task, inputData);
 
             // 更新进度：OCR阶段
             updateProgress(progressKey, TaskProgressDTO.of(task.getTaskId(), "OCR_PROCESSING", 30));
 
             // 执行Python脚本（带重试）
-            Map<String, Object> result = executeWithRetry(inputFilePath, extractFieldsJson, progressKey, task.getTaskId());
+            Map<String, Object> result = executeWithRetry(inputFilePath, progressKey, task.getTaskId());
 
             // 更新进度：完成
             updateProgress(progressKey, TaskProgressDTO.of(task.getTaskId(), "COMPLETED", 100));
-
-            // 清理临时文件
-            Files.deleteIfExists(inputFilePath);
 
             // 缓存结果
             cacheTaskResult(task.getTaskId(), result);
@@ -107,15 +146,27 @@ public class QwenExtractService {
                     .build());
             throw new RuntimeException("处理失败: " + e.getMessage());
         } finally {
-            activeProcesses.decrementAndGet();
-            processSemaphore.release();
+            // 清理临时输入文件
+            if (inputFilePath != null) {
+                try {
+                    Files.deleteIfExists(inputFilePath);
+                } catch (IOException ex) {
+                    log.warn("清理输入文件失败: {}", inputFilePath, ex);
+                }
+            }
+            if (processRegistered) {
+                activeProcesses.decrementAndGet();
+            }
+            if (semaphoreAcquired) {
+                processSemaphore.release();
+            }
         }
     }
 
     /**
      * 带重试机制的执行
      */
-    private Map<String, Object> executeWithRetry(Path inputFilePath, String extractFieldsJson,
+    private Map<String, Object> executeWithRetry(Path inputFilePath,
                                                   String progressKey, Long taskId) {
         Exception lastException = null;
 
@@ -127,7 +178,7 @@ public class QwenExtractService {
                 int baseProgress = 50 + (attempt - 1) * 15;
                 updateProgress(progressKey, TaskProgressDTO.of(taskId, "QWEN_EXTRACTING", baseProgress));
 
-                Map<String, Object> result = executePythonScript(inputFilePath, extractFieldsJson, progressKey, taskId);
+                Map<String, Object> result = executePythonScript(inputFilePath, progressKey, taskId);
 
                 if ("success".equals(result.get("status"))) {
                     return result;
@@ -161,7 +212,7 @@ public class QwenExtractService {
     /**
      * 执行Python脚本
      */
-    private Map<String, Object> executePythonScript(Path inputFilePath, String extractFieldsJson,
+    private Map<String, Object> executePythonScript(Path inputFilePath,
                                                      String progressKey, Long taskId) throws Exception {
         File scriptFile = new File(pythonWorkerDir, scriptPath);
 
@@ -170,11 +221,9 @@ public class QwenExtractService {
             return generateMockResult();
         }
 
-        List<String> command = buildCommand(inputFilePath, extractFieldsJson);
+        List<String> command = buildCommand(inputFilePath);
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.directory(new File(pythonWorkerDir));
-        // 不要合并stderr和stdout，因为Python脚本通过stderr输出日志，stdout输出JSON结果
-        // pb.redirectErrorStream(true);
 
         // 设置环境变量
         Map<String, String> env = pb.environment();
@@ -184,80 +233,66 @@ public class QwenExtractService {
         log.info("启动Python进程: {}", command);
         Process process = pb.start();
 
-        StringBuilder output = new StringBuilder();
-        StringBuilder errorOutput = new StringBuilder();
-        long startTime = System.currentTimeMillis();
-        long timeoutMs = qwenConfig.getTaskTimeout() * 1000L;
+        CompletableFuture<String> stdoutFuture = CompletableFuture.supplyAsync(
+                () -> readProcessStream(process.getInputStream(), false, progressKey, taskId));
+        CompletableFuture<String> stderrFuture = CompletableFuture.supplyAsync(
+                () -> readProcessStream(process.getErrorStream(), true, progressKey, taskId));
 
-        // 分别读取stdout和stderr
-        try (BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream(), "UTF-8"));
-             BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream(), "UTF-8"))) {
-            
-            while (true) {
-                // 检查超时
-                if (System.currentTimeMillis() - startTime > timeoutMs) {
-                    process.destroyForcibly();
-                    throw new RuntimeException("处理超时 (" + qwenConfig.getTaskTimeout() + "秒)");
-                }
-
-                // 读取stdout
-                while (stdoutReader.ready()) {
-                    String line = stdoutReader.readLine();
-                    if (line != null) {
-                        output.append(line).append("\n");
-                    }
-                }
-
-                // 读取stderr（日志输出）
-                while (stderrReader.ready()) {
-                    String line = stderrReader.readLine();
-                    if (line != null) {
-                        errorOutput.append(line).append("\n");
-                        log.debug("Python日志: {}", line);
-                        // 解析进度信息
-                        parseProgressUpdate(line, progressKey, taskId);
-                    }
-                }
-
-                // 检查进程状态
-                try {
-                    int exitCode = process.exitValue();
-                    // 读取剩余输出
-                    String line;
-                    while ((line = stdoutReader.readLine()) != null) {
-                        output.append(line).append("\n");
-                    }
-                    while ((line = stderrReader.readLine()) != null) {
-                        errorOutput.append(line).append("\n");
-                        log.debug("Python日志: {}", line);
-                    }
-
-                    if (exitCode != 0) {
-                        log.error("Python脚本执行失败: exitCode={}, stderr={}", exitCode, errorOutput);
-                        throw new RuntimeException("脚本执行失败，退出码: " + exitCode);
-                    }
-
-                    break;
-                } catch (IllegalThreadStateException e) {
-                    Thread.sleep(200);
-                }
-            }
+        boolean finished = process.waitFor(qwenConfig.getTaskTimeout(), TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
+            throw new RuntimeException("处理超时 (" + qwenConfig.getTaskTimeout() + "秒)");
         }
 
-        String outputStr = output.toString().trim();
-        return parseOutput(outputStr);
+        String stdoutText = stdoutFuture.get(5, TimeUnit.SECONDS).trim();
+        String stderrText = stderrFuture.get(5, TimeUnit.SECONDS).trim();
+        int exitCode = process.exitValue();
+
+        if (exitCode != 0) {
+            String failureDetail = extractPythonFailureDetail(stdoutText, stderrText);
+
+            log.error("Python脚本执行失败: exitCode={}, stdout={}, stderr={}",
+                    exitCode, stdoutText, stderrText);
+
+            if (failureDetail.isBlank()) {
+                // 无结构化错误信息，提取stderr尾部作为诊断信息
+                failureDetail = stderrText.isBlank()
+                        ? "子进程异常退出，无错误输出"
+                        : stderrText.substring(Math.max(0, stderrText.length() - 500));
+            }
+            String workerHint = "（检查 MINERU_API_KEY 和 DASHSCOPE_API_KEY 环境变量是否正确配置）";
+            throw new RuntimeException("PDF解析失败（退出码: " + exitCode + "）。"
+                    + failureDetail + " " + workerHint);
+        }
+
+        return parseOutput(stdoutText);
     }
 
-    /**
-     * 构建命令
-     */
-    private List<String> buildCommand(Path inputFilePath, String extractFieldsJson) {
+
+    private List<String> buildCommand(Path inputFilePath) {
         List<String> command = new ArrayList<>();
         command.add(pythonPath);
         command.add(scriptPath);
         command.add(inputFilePath.toString());
-        command.add(extractFieldsJson);
         return command;
+    }
+
+    private String readProcessStream(InputStream stream, boolean stderr, String progressKey, Long taskId) {
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append('\n');
+                if (stderr) {
+                    log.debug("Python日志: {}", line);
+                    parseProgressUpdate(line, progressKey, taskId);
+                }
+            }
+        } catch (IOException e) {
+            log.debug("读取Python{}结束: {}", stderr ? "日志" : "输出", e.getMessage());
+        }
+        return output.toString();
     }
 
     /**
@@ -288,13 +323,7 @@ public class QwenExtractService {
         }
 
         // 尝试提取JSON部分
-        String jsonStr = outputStr;
-        int jsonStart = outputStr.indexOf('{');
-        int jsonEnd = outputStr.lastIndexOf('}');
-
-        if (jsonStart >= 0 && jsonEnd > jsonStart) {
-            jsonStr = outputStr.substring(jsonStart, jsonEnd + 1);
-        }
+        String jsonStr = extractJsonObject(outputStr);
 
         try {
             return objectMapper.readValue(jsonStr, Map.class);
@@ -304,16 +333,71 @@ public class QwenExtractService {
         }
     }
 
+    private String extractPythonFailureDetail(String stdoutText, String stderrText) {
+        String stdoutMessage = parseErrorMessageFromJson(stdoutText);
+        if (stdoutMessage != null && !stdoutMessage.isBlank()) {
+            return stdoutMessage;
+        }
+        if (stdoutText != null && !stdoutText.isBlank()) {
+            return stdoutText;
+        }
+
+        String stderrMessage = parseErrorMessageFromJson(stderrText);
+        if (stderrMessage != null && !stderrMessage.isBlank()) {
+            return stderrMessage;
+        }
+        if (stderrText != null && !stderrText.isBlank()) {
+            return stderrText;
+        }
+
+        return "";
+    }
+
+    private String parseErrorMessageFromJson(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+
+        try {
+            String jsonText = extractJsonObject(text);
+            Map<String, Object> payload = objectMapper.readValue(jsonText, Map.class);
+            Object message = payload.get("message");
+            if (message != null) {
+                return String.valueOf(message).trim();
+            }
+        } catch (Exception ignored) {
+            // Ignore non-JSON output and fall back to raw text.
+        }
+
+        return null;
+    }
+
+    private String extractJsonObject(String text) {
+        if (text == null || text.isBlank()) {
+            return text;
+        }
+
+        int jsonStart = text.indexOf('{');
+        int jsonEnd = text.lastIndexOf('}');
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+            return text.substring(jsonStart, jsonEnd + 1);
+        }
+        return text;
+    }
+
     /**
      * 准备输入数据
      */
-    private Map<String, Object> prepareInputData(Task task, String modelMode, String inferenceConfigJson) {
+    private Map<String, Object> prepareInputData(Task task, String extractFieldsJson, String modelMode, String inferenceConfigJson) {
         Map<String, Object> inputData = new HashMap<>();
         inputData.put("taskId", task.getTaskId());
         inputData.put("taskName", task.getTaskName());
         inputData.put("userId", task.getUser().getUserId());
         inputData.put("modelMode", modelMode);  // 添加模型模式
         inputData.put("inferenceConfig", parseInferenceConfig(inferenceConfigJson));
+        if (extractFieldsJson != null && !extractFieldsJson.isBlank()) {
+            inputData.put("extractFieldsJson", extractFieldsJson);
+        }
 
         if (task.getFilePath() != null) {
             String fileName = (String) task.getFilePath().get("fileName");
@@ -347,15 +431,30 @@ public class QwenExtractService {
     }
 
     private Map<String, Object> parseInferenceConfig(String inferenceConfigJson) {
+        Map<String, Object> defaults = buildDefaultInferenceConfig();
         if (inferenceConfigJson == null || inferenceConfigJson.isBlank()) {
-            return Collections.emptyMap();
+            return defaults;
         }
         try {
-            return objectMapper.readValue(inferenceConfigJson, Map.class);
+            Map<String, Object> parsed = objectMapper.readValue(inferenceConfigJson, Map.class);
+            if (parsed == null || parsed.isEmpty()) {
+                return defaults;
+            }
+            defaults.putAll(parsed);
+            return defaults;
         } catch (Exception e) {
             log.warn("解析 inferenceConfig 失败，将使用默认参数: {}", inferenceConfigJson, e);
-            return Collections.emptyMap();
+            return defaults;
         }
+    }
+
+    private Map<String, Object> buildDefaultInferenceConfig() {
+        Map<String, Object> defaults = new HashMap<>();
+        defaults.put("temperature", 0);
+        defaults.put("topP", 1);
+        defaults.put("topK", 1);
+        defaults.put("maxTokens", 4096);
+        return defaults;
     }
 
     /**

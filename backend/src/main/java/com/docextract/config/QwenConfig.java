@@ -25,7 +25,7 @@ public class QwenConfig {
     /**
      * 最大并发处理数
      */
-    private int maxConcurrent = 3;
+    private int maxConcurrent = 8;
 
     /**
      * 单个任务超时时间（秒）

@@ -18,8 +18,8 @@ public class AsyncConfig {
     @Bean(name = "taskExecutor")
     public Executor taskExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(2);
-        executor.setMaxPoolSize(5);
+        executor.setCorePoolSize(3);
+        executor.setMaxPoolSize(8);  // 增加最大线程数，支持更多并发任务
         executor.setQueueCapacity(100);
         executor.setThreadNamePrefix("qwen-task-");
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());

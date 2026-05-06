@@ -11,14 +11,7 @@ from dashscope import MultiModalConversation
 from pathlib import Path
 import dashscope
 from dotenv import load_dotenv
-from typing import Tuple, Optional, Dict, Any
-
-# 导入本地模型客户端
-try:
-    from local_model_client import LocalModelClient, LocalModelConfig, create_client
-    LOCAL_MODEL_AVAILABLE = True
-except ImportError:
-    LOCAL_MODEL_AVAILABLE = False
+from typing import Tuple, Optional, Dict, Any, List
 
 load_dotenv()
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
@@ -39,15 +32,15 @@ else:
         logger.warning("prompt.txt 文件为空，Qwen 将无法正确提取数据！")
 
 # 模型配置
-MODEL_VL = "qwen3-vl-plus"             # 视觉模型（带图表）- 普通版 / 筛选模型
-MODEL_LONG = "qwen-long"              # 长文本模型（无图表）- 普通版
-MODEL_PRO = "qwen3.6-plus"             # 专业版主模型 - 更强大的推理能力
+MODEL_VL = "qwen3-vl-plus"             # 仅专业版用于前置图片筛选/图表理解
+MODEL_LONG = "qwen-long"              # 普通版纯文本/长文本路由模型
+MODEL_PRO = "qwen3.6-plus"             # 普通版图片路线与专业版主抽取模型
 
-# qwen3-vl-plus 参数配置（普通版-视觉）
+# qwen3-vl-plus 参数配置（专业版前置筛选）
 MAX_CONTEXT_LENGTH_VL = 254000        # qwen3-vl-plus 最大输入长度 254K
 MAX_CONTEXT_LENGTH_LONG = 1000000     # qwen-long 支持超长上下文（1M tokens）
 
-# qwen3.6-plus 参数配置（专业版）
+# qwen3.6-plus 参数配置（普通版/专业版主模型）
 MAX_CONTEXT_LENGTH_PRO = 991000       # qwen3.6-plus 最大输入长度 991K
 MAX_RPM_PRO = 30000                   # 专业版 RPM: 30000
 MAX_TPM_PRO = 5000000                 # 专业版 TPM: 5M
@@ -69,7 +62,7 @@ class ImageFilter:
 
     # 无关图片的关键词
     IRRELEVANT_PATTERNS = [
-        r'logo', r'图标', r'avatar', r'头像', r'背景',
+        r'logo', r'图标', r'avatar', r'头像',
         r'广告', r'advertisement', r'sponsor', r'品牌',
         r'水印', r'watermark', r'装饰', r'decoration',
     ]
@@ -79,22 +72,31 @@ class ImageFilter:
         r'图', r'figure', r'table', r'表', r'chart', r'图表',
         r'数据', r'data', r'结果', r'result', r'分析',
         r'趋势', r'对比', r'comparison', r'statis',
+        r'panel', r'坐标', r'坐标轴', r'分布', r'曲线', r'热图',
+        r'散点', r'柱状', r'折线', r'示意', r'流程', r'密度',
+        r'能量', r'场', r'trajectory', r'colorbar',
     ]
 
     def __init__(self):
         self._stats = {"total": 0, "filtered": 0, "kept": 0}
 
-    def _is_relevant_image(self, description: str) -> Tuple[bool, str]:
+    def _is_relevant_image(self, image_type: str, description: str) -> Tuple[bool, str]:
         """
         判断图片是否与指标提取相关
 
         Args:
+            image_type: VL模型输出的图片类型
             description: VL模型对图片的描述
 
         Returns:
             (is_relevant, reason) - 是否相关及原因
         """
+        type_lower = (image_type or "").lower()
         desc_lower = description.lower()
+
+        # 科研场景下，只要模型认为是图表/表格/示意图，优先保留
+        if type_lower in {"chart", "table", "diagram"}:
+            return True, f"图片类型相关: {type_lower}"
 
         # 检查是否是不相关的类型
         for pattern in self.IRRELEVANT_PATTERNS:
@@ -113,22 +115,35 @@ class ImageFilter:
         # 默认保留（宁可多保留也不漏掉）
         return True, "默认保留"
 
-    def _call_vl_for_image_description(self, image_path: str, prompt: str = None) -> Tuple[str, str]:
+    def _call_vl_for_image_description(self, image_path: str, prompt: str = None) -> Tuple[str, str, str]:
         """
         调用 qwen3-vl-plus 解析单张图片
 
         Returns:
-            (description, table_json_or_reason) - 图片描述或表格JSON
+            (image_type, description, table_json_or_reason) - 图片类型、图片描述或表格JSON
         """
         default_prompt = """你是一个图片分析助手。请分析这张图片：
-1. 如果是图表/表格/数据图，请描述图表内容并尝试提取其中的结构化数据（表格形式）
+1. 如果是图表/表格/数据图，请描述图表内容并尽量逐行提取其中的结构化数据
 2. 如果是示意图/流程图，请描述其含义
 3. 如果是普通图片（logo/头像/装饰等），请说明图片类型
+4. 如果图片中存在表格，请把每一行都作为 table_data.rows 的一个对象，尽量保留所有列名、单位、脚注和条件说明
 
-请用JSON格式输出：{"type": "chart/table/diagram/photo", "description": "图片描述", "table_data": "如果是表格，JSON字符串"}"""
+请用JSON格式输出：
+{
+  "type": "chart/table/diagram/photo",
+  "description": "图片描述",
+  "table_data": {
+    "caption": "表格或图表标题，没有则填NA",
+    "columns": ["列名1", "列名2"],
+    "rows": [
+      {"列名1": "第1行值1", "列名2": "第1行值2"},
+      {"列名1": "第2行值1", "列名2": "第2行值2"}
+    ],
+    "notes": "单位、脚注或实验条件，没有则填NA"
+  }
+}"""
 
         actual_prompt = prompt or default_prompt
-        md_dir = Path(image_path).parent.parent  # images -> md folder
 
         messages = [
             {"role": "system", "content": [{"text": "你是一个图片分析助手，只输出JSON格式的分析结果。"}]},
@@ -144,7 +159,7 @@ class ImageFilter:
                 messages=messages,
                 temperature=0,
                 top_p=1,
-                top_k=20,
+                top_k=1,
                 response_format={"type": "json_object"}
             )
 
@@ -158,30 +173,115 @@ class ImageFilter:
                         description = result.get("description", "")
                         table_data = result.get("table_data")
 
-                        # 如果是表格，尝试解析为结构化数据
                         if table_data and img_type in ["table", "chart"]:
                             try:
-                                # 表格数据可能是JSON字符串
                                 if isinstance(table_data, str):
                                     structured = json.loads(table_data)
                                 else:
                                     structured = table_data
-                                return description, json.dumps(structured, ensure_ascii=False)
+                                return img_type, description, json.dumps(structured, ensure_ascii=False)
                             except:
-                                return description, table_data  # 原始字符串
+                                return img_type, description, table_data
 
-                        return description, ""
+                        return img_type, description, ""
                     except json.JSONDecodeError:
-                        return json_str, ""
-                return str(content), ""
+                        return "unknown", json_str, ""
+                return "unknown", str(content), ""
             else:
-                return f"API错误: {rsp.message}", ""
+                return "unknown", f"API错误: {rsp.message}", ""
         except Exception as e:
-            return f"异常: {str(e)}", ""
+            return "unknown", f"异常: {str(e)}", ""
+
+    def _call_vl_batch_description(self, image_paths: List[str], prompt: str = None) -> List[Dict[str, Any]]:
+        """
+        批量调用 qwen3-vl-plus 一次性理解一批图片（最多4张，一次会话）
+
+        Args:
+            image_paths: 图片路径列表（最多4张）
+
+        Returns:
+            每张图片的分析结果列表
+        """
+        if not image_paths:
+            return []
+
+        # 简洁的提示词，直接分析，不要思考过程，只输出结构化分析结果
+        analysis_prompt = """分析以下图片，每张图片输出一行JSON（不要换行，不要有任何其他内容）：
+[图片文件名]: 类型 | 描述 | 表格数据(有表格才填JSON，没有填-)
+
+类型只能是: chart / table / diagram / photo / logo
+描述: 简洁描述图片内容，不超过50字
+表格数据: 如果有表格则提取核心行列数据（行以;分隔），否则填-
+
+输出示例（每行对应一张图片，不要加任何标记）：
+image1.jpg: chart | 材料性能对比柱状图 | 样品A:12.5%; 样品B:15.3%; 样品C:18.1%
+image2.jpg: table | 实验条件参数表 | 温度:300K; 压力:1atm; 时间:2h
+image3.jpg: photo | SEM扫描图像 | -
+image4.jpg: logo | 公司Logo | -"""
+
+        user_content = [{"text": analysis_prompt}]
+        for img_path in image_paths:
+            user_content.append({"image": f"file://{img_path}"})
+
+        messages = [
+            {"role": "system", "content": [{"text": "你是一个图片分析助手，直接输出分析结果，不要输出思考过程，不要解释，只输出JSON格式的一行分析。"}]},
+            {"role": "user", "content": user_content}
+        ]
+
+        try:
+            rsp = MultiModalConversation.call(
+                model=MODEL_VL,
+                messages=messages,
+                temperature=0,
+                top_p=1,
+                top_k=1,
+                # thought 设为 false 禁用思考过程（如果API支持）
+            )
+
+            results = []
+            if rsp.status_code == 200:
+                content = rsp.output.choices[0].message.content
+                if isinstance(content, list) and content and "text" in content[0]:
+                    json_str = content[0]["text"]
+
+                    # 解析每行：filename: type | description | table_data
+                    for line in json_str.strip().split('\n'):
+                        line = line.strip()
+                        if not line or line.startswith('{'):
+                            continue
+                        # 格式: filename: type | description | table_data
+                        parts = line.split(': ')
+                        if len(parts) < 2:
+                            continue
+                        img_name = parts[0].strip()
+                        rest = parts[1].strip()
+                        subparts = rest.split('|')
+                        if len(subparts) >= 1:
+                            img_type = subparts[0].strip()
+                        if len(subparts) >= 2:
+                            description = subparts[1].strip()
+                        if len(subparts) >= 3:
+                            table_data = subparts[2].strip() if subparts[2].strip() != '-' else ''
+                        else:
+                            description = rest
+                            table_data = ''
+
+                        results.append({
+                            "path": img_name,
+                            "type": img_type if 'img_type' in locals() else "unknown",
+                            "description": description if 'description' in locals() else "",
+                            "table_data": table_data if 'table_data' in locals() else ""
+                        })
+
+            return results
+
+        except Exception as e:
+            logger.error(f"批量图片理解失败: {e}")
+            return []
 
     def filter_images(self, image_paths: List[str], extract_keywords: List[str] = None) -> List[Dict[str, Any]]:
         """
-        过滤图片并获取理解结果
+        过滤图片并获取理解结果 - 并行批量处理，每批最多4张图，使用线程池并行处理所有批次
 
         Args:
             image_paths: 图片路径列表
@@ -191,37 +291,68 @@ class ImageFilter:
             保留的图片信息列表，每项包含: path, description, table_data, is_table
         """
         self._stats["total"] += len(image_paths)
-
-        # 如果有关键词，扩展相关模式
+        relevant_keywords = list(self.RELEVANT_KEYWORDS)
         if extract_keywords:
-            self.RELEVANT_KEYWORDS.extend(extract_keywords)
+            relevant_keywords.extend(extract_keywords)
 
+        # 分批：每批4张图片
+        batch_size = 4
+        batches = []
+        for i in range(0, len(image_paths), batch_size):
+            batches.append(image_paths[i:i + batch_size])
+
+        logger.info(f"🖼️ 共 {len(image_paths)} 张图片，分 {len(batches)} 批并行处理，每批 {batch_size} 张")
+
+        # 使用线程池并行处理所有批次
+        all_results = []
+        with ThreadPoolExecutor(max_workers=len(batches)) as executor:
+            futures = {executor.submit(self._call_vl_batch_description, batch): i for i, batch in enumerate(batches)}
+            for future in as_completed(futures):
+                batch_idx = futures[future]
+                try:
+                    batch_result = future.result()
+                    all_results.extend(batch_result)
+                    logger.info(f"✅ 第 {batch_idx + 1}/{len(batches)} 批完成")
+                except Exception as e:
+                    logger.error(f"❌ 第 {batch_idx + 1} 批失败: {e}")
+
+        logger.info(f"📊 并行处理完成，共 {len(all_results)} 个结果")
+
+        # 匹配结果到图片路径
         kept_images = []
+        for img_path in sorted(image_paths):
+            img_name = Path(img_path).name
 
-        for img_path in image_paths:
-            logger.info(f"🖼️ 分析图片: {Path(img_path).name}")
-
-            # 调用VL模型分析图片
-            description, table_data = self._call_vl_for_image_description(img_path)
-            logger.info(f"   描述: {description[:100]}...")
+            # 匹配结果
+            description = ""
+            table_data = ""
+            img_type = "unknown"
+            for result in all_results:
+                if result.get("path") and (img_name in result["path"] or result["path"] in img_name):
+                    img_type = result.get("type", "unknown")
+                    description = result.get("description", "")
+                    table_data = result.get("table_data", "")
+                    break
 
             # 判断是否相关
-            is_relevant, reason = self._is_relevant_image(description)
+            original_keywords = self.RELEVANT_KEYWORDS
+            self.RELEVANT_KEYWORDS = relevant_keywords
+            try:
+                is_relevant, reason = self._is_relevant_image(img_type, description)
+            finally:
+                self.RELEVANT_KEYWORDS = original_keywords
 
             if is_relevant:
                 kept_images.append({
                     "path": img_path,
+                    "type": img_type,
                     "description": description,
                     "table_data": table_data,
                     "is_table": bool(table_data)
                 })
                 self._stats["kept"] += 1
-                logger.info(f"   ✅ 保留: {reason}")
-                if table_data:
-                    logger.info(f"   📊 表格数据: {table_data[:200]}...")
             else:
                 self._stats["filtered"] += 1
-                logger.info(f"   ❌ 过滤: {reason}")
 
         logger.info(f"📊 图片过滤结果: 总计 {self._stats['total']}, 保留 {self._stats['kept']}, 过滤 {self._stats['filtered']}")
         return kept_images
@@ -304,11 +435,11 @@ class ModelRouteCache:
     def get_stats(self) -> Dict[str, int]:
         """获取缓存统计"""
         with self._lock:
-            vl_count = sum(1 for v in self._cache.values() if v.get("model") == MODEL_VL)
+            pro_count = sum(1 for v in self._cache.values() if v.get("model") == MODEL_PRO)
             long_count = sum(1 for v in self._cache.values() if v.get("model") == MODEL_LONG)
             return {
                 "total": len(self._cache),
-                "vl_model": vl_count,
+                "pro_model": pro_count,
                 "long_model": long_count
             }
 
@@ -347,7 +478,7 @@ class ModelRouter:
     
     def __init__(self):
         self._cache = ModelRouteCache()
-        self._stats = {"vl_calls": 0, "long_calls": 0, "cache_hits": 0}
+        self._stats = {"pro_calls": 0, "long_calls": 0, "cache_hits": 0}
         self._stats_lock = threading.Lock()
     
     def has_figures(self, text: str, image_paths: list) -> Tuple[bool, Dict[str, Any]]:
@@ -415,35 +546,40 @@ class ModelRouter:
         """
         # 1. 尝试从缓存获取
         cached = self._cache.get(text, len(image_paths))
-        if cached:
+        expected_model = MODEL_PRO if len(image_paths) > 0 else MODEL_LONG
+        if cached and cached.get("model") == expected_model:
             with self._stats_lock:
                 self._stats["cache_hits"] += 1
             logger.info(f"🎯 路由缓存命中: {cached['model']}")
             return cached["model"], cached
+        if cached:
+            logger.info(f"路由缓存包含旧模型 {cached.get('model')}，已忽略并重新计算")
         
         # 2. 分析文档特征
         has_fig, analysis = self.has_figures(text, image_paths)
         
-        # 3. 选择模型
-        if has_fig:
-            model = MODEL_VL
-            route_reason = f"检测到图表特征 → 使用视觉模型 {MODEL_VL}"
+        # 3. 选择模型：普通版只在实际存在图片输入时切到 qwen3.6-plus。
+        has_image_assets = len(image_paths) > 0
+        if has_image_assets:
+            model = MODEL_PRO
+            route_reason = f"检测到图片输入 → 使用主模型 {MODEL_PRO}（普通版不调用 qwen3-vl-plus）"
         else:
             model = MODEL_LONG
-            route_reason = f"纯文本文档 → 使用长文本模型 {MODEL_LONG}（更快更经济）"
+            route_reason = f"无图片输入 → 使用长文本模型 {MODEL_LONG}（正文中的图表文字引用仍按文本处理）"
         
         # 4. 构建路由信息
         route_info = {
             "model": model,
             "has_figures": has_fig,
+            "has_image_assets": has_image_assets,
             "reason": route_reason,
             **analysis
         }
         
         # 5. 更新统计
         with self._stats_lock:
-            if model == MODEL_VL:
-                self._stats["vl_calls"] += 1
+            if model == MODEL_PRO:
+                self._stats["pro_calls"] += 1
             else:
                 self._stats["long_calls"] += 1
         
@@ -558,7 +694,7 @@ def try_repair_json(json_str: str):
             return None
 
 def build_messages(text: str, img_abs_paths: list[str], prompt: str = None) -> list:
-    """为Qwen3-VL构建消息格式 - 使用system角色传递提示词"""
+    """为多模态主模型构建消息格式 - 使用system角色传递提示词"""
     # 使用传入的提示词或默认提示词
     actual_prompt = prompt if prompt else PROMPT_TXT
     if not actual_prompt or not actual_prompt.strip():
@@ -574,7 +710,7 @@ def build_messages(text: str, img_abs_paths: list[str], prompt: str = None) -> l
     # 创建用户消息（包含论文文本和图片）
     user_content = [{"text": text}]
     
-    # 添加图片 - Qwen3-VL支持更好的多图像处理
+    # 添加图片 - 普通版直接传原始图片，专业版传筛选后的图片
     for img_path in img_abs_paths:
         user_content.append({"image": f"file://{img_path}"})
     
@@ -591,23 +727,21 @@ def normalize_inference_config(inference_config: Optional[Dict[str, Any]] = None
     normalized = {
         "temperature": float(config.get("temperature", 0) or 0),
         "top_p": float(config.get("topP", config.get("top_p", 1)) or 1),
-        "top_k": int(config.get("topK", config.get("top_k", 20)) or 20),
+        "top_k": int(config.get("topK", config.get("top_k", 1)) or 1),
         "max_tokens": int(config.get("maxTokens", config.get("max_tokens", 4096)) or 4096),
-        "use_images": bool(config.get("useImages", config.get("use_images", True))),
     }
     return normalized
 
 def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal",
                  inference_config: Optional[Dict[str, Any]] = None) -> tuple:
-    """使用智能模型路由进行提取
+    """使用普通版/专业版链路进行提取
     
     Args:
         md_file: Markdown文件路径
         prompt: 动态提示词（可选，如果不提供则使用默认PROMPT_TXT）
         model_mode: 模型模式
-            - "normal": 普通版 - 智能路由（qwen3-vl-plus / qwen-long）
-            - "pro": 专业版 - 统一使用 qwen3.6-plus（更强大，991K上下文）
-            - "local": 本地模型 - 使用本地部署的模型（OpenAI 兼容 API）
+            - "normal": 普通版 - 智能路由；无图片输入走 qwen-long，有图片输入走 qwen3.6-plus
+            - "pro": 专业版 - qwen3-vl-plus 前置筛图/图表理解，再交给 qwen3.6-plus
     
     Returns:
         (status, result) 元组
@@ -642,35 +776,21 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal",
             logger.info("未找到带Fig描述的图片，尝试文件名包含'fig'的图片")
             img_dir = md_dir / "images"
             if img_dir.exists():
-                for p in img_dir.glob("*"):
+                for p in sorted(img_dir.glob("*"), key=lambda item: item.name):
                     if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".gif"} and "fig" in p.stem.lower():
                         fig_imgs.append(str(p.resolve()))
                         logger.info(f"添加文件名含'fig'的图片: {p.name}")
         
         # 不再限制图片数量，全部传入
-        abs_imgs = fig_imgs
+        abs_imgs = sorted(fig_imgs)
         logger.info(f"🖼️ 共找到 {len(abs_imgs)} 张图片")
 
         # 3. 🚀 模型选择逻辑
-        if model_mode == "local":
-            # 本地模型模式
-            if not LOCAL_MODEL_AVAILABLE:
-                raise RuntimeError("本地模型功能不可用，请确保 openai 库已安装: pip install openai")
-            
-            local_config = LocalModelConfig.load_from_env()
-            if not local_config.get("enabled"):
-                logger.warning("本地模型未启用，将尝试加载配置...")
-            
-            selected_model = local_config.get("model", "local-model")
-            route_info = {
-                "model": selected_model,
-                "has_figures": len(abs_imgs) > 0,
-                "reason": f"本地模型模式 → 使用 {selected_model}（OpenAI 兼容 API）",
-                "base_url": local_config.get("base_url"),
-                "preset": local_config.get("preset")
-            }
-            logger.info(f"🖥️ 本地模型模式: {selected_model} @ {local_config.get('base_url')}")
-        elif model_mode == "pro":
+        if model_mode not in {"normal", "pro"}:
+            logger.warning(f"Unsupported model_mode={model_mode}, fallback to normal")
+            model_mode = "normal"
+
+        if model_mode == "pro":
             # 专业版：先过滤图片，再使用 qwen3.6-plus
             selected_model = MODEL_PRO
 
@@ -689,12 +809,17 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal",
             logger.info(f"📊 专业版图片过滤: 原始 {len(abs_imgs)} 张 → 保留 {len(filtered_imgs)} 张")
             logger.info(f"📊 图片理解结果数量: {len(kept_image_info)}")
         else:
-            # 普通版：智能路由
+            # 普通版：保留智能路由；无图片输入走 qwen-long，有图片输入走 qwen3.6-plus。
             selected_model, route_info = _model_router.route(raw_text, abs_imgs)
-            logger.info(f"📊 智能路由决策: 模型={selected_model}, 原因={route_info.get('reason', 'N/A')}")
+            route_info.update({
+                "original_image_count": len(abs_imgs),
+                "filtered_image_count": len(abs_imgs),
+                "images_understood": []
+            })
+            logger.info(f"📊 普通版智能路由: 模型={selected_model}, 原因={route_info.get('reason', 'N/A')}")
         
         # 4. 根据模型类型进行文本预处理（不同模型有不同的上下文限制）
-        # 本地模型不做预处理截断，由模型自己处理
+        text = raw_text
 
         # 专业版：使用过滤后的图片，并添加图片理解结果到文本
         if model_mode == "pro":
@@ -706,108 +831,39 @@ def extract_once(md_file: str, prompt: str = None, model_mode: str = "normal",
             if kept_image_info:
                 image_context = "\n\n=== 图片理解结果 ===\n"
                 for i, img_info in enumerate(kept_image_info, 1):
-                    image_context += f"\n图片 {i}: {img_info['description']}"
+                    image_name = Path(img_info.get("path", "")).name or f"image_{i}"
+                    image_context += f"\n图片 {i} ({image_name}): {img_info['description']}"
                     if img_info.get('table_data'):
-                        image_context += f"\n表格数据: {img_info['table_data']}"
+                        image_context += (
+                            "\n表格数据（请在最终结果中按 rows 逐行展开为 mult-data 条目，"
+                            "不要只做摘要）: "
+                            f"{img_info['table_data']}"
+                        )
                 text = text + image_context
                 logger.info(f"📝 已将图片理解结果添加到上下文中")
 
-        if model_mode == "local":
-            text = raw_text  # 本地模型不截断
-            estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
-            logger.info(f"📄 本地模型文本长度: {len(text)} 字符")
-            logger.info(f"💰 本地模型估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
-        else:
-            text = preprocess_context(text, model=selected_model)
-            logger.info(f"📄 文本长度: {len(text)} 字符 (模型: {selected_model})")
+        text = preprocess_context(text, model=selected_model)
+        logger.info(f"📄 文本长度: {len(text)} 字符 (模型: {selected_model})")
 
         # 5. 估算token
-        if model_mode != "local":
-            if selected_model == MODEL_LONG:
-                # qwen-long 是纯文本模型，不计入图片token
-                estimated_tokens = len(text) // 3.5
-                logger.info(f"💰 qwen-long 纯文本估算: {estimated_tokens} tokens")
-            elif selected_model == MODEL_PRO:
-                # qwen3.6-plus 专业版（已过滤图片）
-                estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
-                logger.info(f"💰 qwen3.6-plus 估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
-            else:
-                # qwen3-vl-plus
-                estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
-                logger.info(f"💰 qwen3-vl-plus 估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
+        if selected_model == MODEL_LONG:
+            # 普通版纯文本/长文本路线。
+            estimated_tokens = len(text) // 3.5
+            logger.info(f"💰 qwen-long 纯文本估算: {estimated_tokens} tokens")
+        elif selected_model == MODEL_PRO:
+            # qwen3.6-plus 主模型：普通版图片路线使用原始图片，专业版使用筛选后图片。
+            estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
+            logger.info(f"💰 qwen3.6-plus 估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
+        else:
+            # qwen3-vl-plus
+            estimated_tokens = len(text) // 3.5 + len(abs_imgs) * 1000
+            logger.info(f"💰 qwen3-vl-plus 估算: 文本 {len(text)//3.5:.0f} + 图片 {len(abs_imgs)*1000} = {estimated_tokens:.0f} tokens")
 
         # 6. 调用模型 API
-        if model_mode == "local":
-            # 本地模型调用
-            return _call_local_model(text, abs_imgs, prompt, route_info, inference_config)
-        else:
-            # 云端模型调用
-            return _call_cloud_model(text, abs_imgs, prompt, selected_model, route_info, estimated_tokens, inference_config)
+        return _call_cloud_model(text, abs_imgs, prompt, selected_model, route_info, estimated_tokens, inference_config)
             
     except Exception as e:
         logger.error(f"处理失败: {e}")
-        return ("error", str(e))
-
-
-def _call_local_model(text: str, abs_imgs: list, prompt: str, route_info: dict, inference_config: dict) -> tuple:
-    """调用本地模型"""
-    try:
-        local_config = LocalModelConfig.load_from_env()
-        client = LocalModelClient(local_config)
-        
-        logger.info(f"🚀 调用本地模型: {local_config.get('model')}")
-        
-        # 调用本地模型
-        status, result = client.extract_json(
-            text=text,
-            image_paths=abs_imgs,
-            prompt=prompt,
-            temperature=inference_config.get("temperature", 0),
-            top_p=inference_config.get("top_p"),
-            top_k=inference_config.get("top_k"),
-            max_tokens=inference_config.get("max_tokens"),
-            use_images=inference_config.get("use_images", True)
-        )
-        
-        if status == "success":
-            # 添加模型路由信息
-            result["_model_route"] = {
-                "model": route_info.get("model"),
-                "has_figures": route_info.get("has_figures"),
-                "reason": route_info.get("reason"),
-                "base_url": route_info.get("base_url"),
-                "text_length": len(text)
-            }
-            result["_inference_config"] = inference_config
-            # 如果有思考内容，记录到日志
-            if result.get("_local_model", {}).get("reasoning"):
-                logger.info(f"💭 模型思考内容已记录")
-            return ("success", result)
-        elif status == "partial_data":
-            # 尝试修复 JSON
-            raw_content = result.get("raw_content", "")
-            repaired_obj = try_repair_json(raw_content)
-            if repaired_obj is not None:
-                repaired_obj["_model_route"] = {
-                    "model": route_info.get("model"),
-                    "has_figures": route_info.get("has_figures"),
-                    "reason": route_info.get("reason"),
-                    "base_url": route_info.get("base_url"),
-                    "text_length": len(text)
-                }
-                repaired_obj["_local_model"] = {
-                    "model": route_info.get("model"),
-                    "base_url": route_info.get("base_url"),
-                    "reasoning": result.get("reasoning")
-                }
-                repaired_obj["_inference_config"] = inference_config
-                return ("success", repaired_obj)
-            return ("partial_data", result)
-        else:
-            return status, result
-            
-    except Exception as e:
-        logger.error(f"本地模型调用失败: {e}")
         return ("error", str(e))
 
 
@@ -826,7 +882,7 @@ def _call_cloud_model(text: str, abs_imgs: list, prompt: str, selected_model: st
                 # qwen-long 使用简单文本格式
                 messages = build_messages_for_long(text, prompt=prompt)
             else:
-                # qwen-vl 使用多模态格式
+                # qwen3.6-plus 使用多模态消息格式
                 messages = build_messages(text, abs_imgs, prompt=prompt)
             
             rsp = MultiModalConversation.call(
@@ -834,7 +890,7 @@ def _call_cloud_model(text: str, abs_imgs: list, prompt: str, selected_model: st
                 messages=messages,
                 temperature=inference_config.get("temperature", 0),
                 top_p=inference_config.get("top_p", 1),
-                top_k=inference_config.get("top_k", 20),
+                top_k=inference_config.get("top_k", 1),
                 response_format={"type": "json_object"}
             )
             if rsp.status_code == 200:
@@ -1039,7 +1095,10 @@ def main():
     
     # 输出路由统计
     stats = _model_router.get_stats()
-    logger.info(f"📊 模型路由统计: VL模型调用={stats['vl_calls']}, Long模型调用={stats['long_calls']}, 缓存命中={stats['cache_hits']}")
+    logger.info(
+        f"📊 模型路由统计: qwen3.6-plus调用={stats.get('pro_calls', 0)}, "
+        f"qwen-long调用={stats.get('long_calls', 0)}, 缓存命中={stats.get('cache_hits', 0)}"
+    )
     logger.info(f"📦 缓存统计: {stats['cache_stats']}")
 
 if __name__ == "__main__":

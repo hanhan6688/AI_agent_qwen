@@ -42,6 +42,8 @@ public class TaskController {
             @RequestParam(value = "inferenceConfig", required = false) String inferenceConfig,
             @RequestParam("files") MultipartFile[] files) {
 
+        String normalizedModelMode = normalizeModelMode(modelMode);
+
         log.info("创建任务: taskName={}, userId={}, modelMode={}, 文件数量={}", taskName, userId, modelMode, files.length);
 
         // 检查活跃任务数
@@ -50,7 +52,7 @@ public class TaskController {
             return Response.error("您有太多正在处理的任务，请稍后再试");
         }
 
-        List<TaskDTO> tasks = taskService.createTasks(userId, taskName, extractFields, modelMode, inferenceConfig, files);
+        List<TaskDTO> tasks = taskService.createTasks(userId, taskName, extractFields, normalizedModelMode, inferenceConfig, files);
         return Response.success("任务创建成功，正在后台处理", tasks);
     }
 
@@ -147,7 +149,7 @@ public class TaskController {
     @PostMapping("/{taskId}/retry")
     public Response<TaskDTO> retryTask(
             @PathVariable Long taskId,
-            @RequestParam String extractFields) {
+            @RequestParam(required = false) String extractFields) {
 
         log.info("重试任务: taskId={}", taskId);
         TaskDTO task = taskService.retryTask(taskId, extractFields);
@@ -243,5 +245,12 @@ public class TaskController {
             @PathVariable String taskName) {
         taskService.deleteBatchTask(userId, taskName);
         return Response.success("批量任务删除成功", null);
+    }
+
+    private String normalizeModelMode(String modelMode) {
+        if ("pro".equalsIgnoreCase(modelMode)) {
+            return "pro";
+        }
+        return "normal";
     }
 }

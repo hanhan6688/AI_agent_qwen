@@ -8,12 +8,17 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import requests
 from dotenv import load_dotenv
+from tenacity import (
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception_type, before_sleep_log
+)
+import logging
 
 # 加载环境变量
 load_dotenv()
 TOKEN = os.getenv("MINERU_API_KEY")
 POLL_INTERVAL = 10
-BATCH_SIZE = 200  # 新增：API限制单次200个文件
+BATCH_SIZE = 200
 
 BASE_URL = "https://mineru.net/api/v4"
 HEADERS = {
@@ -21,28 +26,46 @@ HEADERS = {
     "Authorization": f"Bearer {TOKEN}"
 }
 
-# 默认目录（当作为独立脚本运行时）
 INPUT_DIR = Path("./PDFS")
 OUTPUT_DIR = Path("./input")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+logger = logging.getLogger('MinerUClient')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stderr)
+
 def _log(msg):
-    """日志输出到stderr，避免污染stdout"""
     print(msg, file=sys.stderr)
 
-def upload_batch(file_batch: List[Path], base_url: str = BASE_URL, 
-                 headers: Dict = None, input_dir: Optional[Path] = None) -> str:
-    """上传一批PDF文件，返回batch_id"""
-    if headers is None:
-        headers = HEADERS
-    if input_dir is None:
-        input_dir = INPUT_DIR
-    
+
+# ============== 统一重试装饰器 ==============
+def is_retriable_error(exception) -> bool:
+    """判断是否为可重试的错误"""
+    if isinstance(exception, requests.RequestException):
+        return True
+    if isinstance(exception, OSError):
+        return True
+    if isinstance(exception, RuntimeError):
+        return True
+    return False
+
+
+retry_upload = retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    retry=retry_if_exception_type(is_retriable_error),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True
+)
+
+
+@retry_upload
+def upload_batch(file_batch: List[Path]) -> str:
+    """上传一批PDF文件，返回batch_id（带重试）"""
     files_data = [
         {"name": p.name, "is_ocr": True, "data_id": f"{p.stem}.pdf-id"}
         for p in file_batch
     ]
-    
+
     payload = {
         "enable_formula": True,
         "language": "ch",
@@ -50,54 +73,55 @@ def upload_batch(file_batch: List[Path], base_url: str = BASE_URL,
         "files": files_data
     }
 
-    url = f"{base_url}/file-urls/batch"
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    
+    url = f"{BASE_URL}/file-urls/batch"
+    r = requests.post(url, headers=HEADERS, json=payload, timeout=60)
+
     if r.status_code != 200:
         raise RuntimeError(f"HTTP错误: {r.status_code}")
-    
+
     resp = r.json()
     if resp.get("code") != 0:
-        error_msg = resp.get("msg", "未知错误")
+        error_msg = resp.get("msg") or resp.get("message") or "未知错误（请检查 MINERU_API_KEY 是否正确）"
         raise RuntimeError(f"获取上传地址失败: {error_msg}")
 
     data = resp["data"]
     batch_id = data["batch_id"]
-    upload_urls: List[str] = data["file_urls"]
+    upload_urls = data["file_urls"]
 
     _log(f"batch_id: {batch_id}")
-    # 逐个PUT上传
+    # 逐个PUT上传（串行，但带重试）
     for pdf_path, upload_url in zip(file_batch, upload_urls):
         with open(pdf_path, "rb") as f:
-            up_resp = requests.put(upload_url, data=f)
+            up_resp = requests.put(upload_url, data=f, timeout=120)
             if up_resp.status_code != 200:
                 raise RuntimeError(f"上传 {pdf_path.name} 失败 {up_resp.status_code}")
         _log(f"✅ 已上传 {pdf_path.name}")
 
     return batch_id
 
-def wait_until_done(batch_id: str, base_url: str = BASE_URL, 
-                    headers: Dict = None, poll_interval: int = None) -> List[Dict]:
-    """轮询直到所有任务结束，返回extract_result列表"""
-    if headers is None:
-        headers = HEADERS
+
+@retry_upload
+def wait_until_done(batch_id: str, poll_interval: int = None) -> List[Dict]:
+    """轮询直到所有任务结束，返回extract_result列表（带重试）"""
     if poll_interval is None:
         poll_interval = POLL_INTERVAL
-        
-    url = f"{base_url}/extract-results/batch/{batch_id}"
+
+    url = f"{BASE_URL}/extract-results/batch/{batch_id}"
     while True:
-        r = requests.get(url, headers=headers, timeout=30)
+        r = requests.get(url, headers=HEADERS, timeout=30)
         r.raise_for_status()
         resp = r.json()
         if resp.get("code") != 0:
-            raise RuntimeError(f"查询结果失败: {resp}")
+            error_msg = resp.get("msg") or resp.get("message") or "未知错误"
+            raise RuntimeError(f"查询MinerU结果失败: {error_msg}")
 
-        results: List[Dict] = resp["data"]["extract_result"]
+        results = resp["data"]["extract_result"]
         states = {item["state"] for item in results}
         _log(f"当前状态 {states}")
         if states <= {"done", "failed", "error"}:
             return results
         time.sleep(poll_interval)
+
 
 def download_zip(url: str, dst: Path) -> None:
     """下载并解压zip"""
@@ -110,23 +134,17 @@ def download_zip(url: str, dst: Path) -> None:
             f.write(chunk)
     with zipfile.ZipFile(zip_path) as zf:
         zf.extractall(dst)
-    zip_path.unlink()  # 删zip
+    zip_path.unlink()
     _log(f"✅ 解压到 {dst}")
 
-def fetch_and_download(batch_id: str, results: List[Dict], output_dir: Optional[Path] = None,
+
+def fetch_and_download(batch_id: str, results: List[Dict],
+                       output_dir: Optional[Path] = None,
                        skip_batch_dir: bool = True) -> None:
-    """把成功的zip拉下来
-    
-    Args:
-        batch_id: 批次ID
-        results: 结果列表
-        output_dir: 输出目录
-        skip_batch_dir: 是否跳过 batch_id 目录层级（默认True，直接输出到output_dir）
-    """
+    """下载成功的zip到output_dir"""
     if output_dir is None:
         output_dir = OUTPUT_DIR
-        
-    # 根据 skip_batch_dir 决定是否创建 batch_id 子目录
+
     if skip_batch_dir:
         batch_out = output_dir
     else:
@@ -142,6 +160,7 @@ def fetch_and_download(batch_id: str, results: List[Dict], output_dir: Optional[
         target_dir = batch_out / data_id
         download_zip(zip_url, target_dir)
 
+
 def process_batch(file_batch: List[Path]):
     """处理单个文件批次"""
     _log(f"=== 开始上传批次 ({len(file_batch)} 个文件) ===")
@@ -152,30 +171,29 @@ def process_batch(file_batch: List[Path]):
     fetch_and_download(batch_id, results)
     _log(f"=== 批次 {batch_id} 完成 ===")
 
+
 def main():
     if not TOKEN or TOKEN == "官网申请的api token":
         raise RuntimeError("请先设置MINERU_API_KEY环境变量")
-    
-    # 获取所有PDF文件
+
     all_pdf_files = list(INPUT_DIR.glob("*.pdf"))
     if not all_pdf_files:
         _log("❌ input目录里没有PDF文件")
         return
-    
+
     _log(f"发现 {len(all_pdf_files)} 个PDF文件")
-    
-    # 分批处理文件 (每批最多200个)
+
     for i in range(0, len(all_pdf_files), BATCH_SIZE):
         file_batch = all_pdf_files[i:i+BATCH_SIZE]
         try:
             process_batch(file_batch)
         except Exception as e:
             _log(f"❌ 处理批次失败: {str(e)}")
-            # 可选：记录失败的文件名以便重试
             with open("failed_batches.txt", "a") as f:
                 f.write(f"批次 {i//BATCH_SIZE}: {[p.name for p in file_batch]}\n")
-    
+
     _log("=== 全部处理完成 ===")
+
 
 if __name__ == "__main__":
     try:
